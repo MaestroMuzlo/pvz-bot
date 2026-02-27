@@ -1,0 +1,6 @@
+json
+{
+  "build": {
+    "builder": "NIXPACKS"
+  }
+}
