@@ -2,6 +2,8 @@ import requests
 import os
 from flask import Flask, request
 import json
+import time
+from bs4 import BeautifulSoup
 
 TG_BOT_TOKEN = os.environ.get('TG_BOT_TOKEN', '8764632286:AAFRLvCGrXC1siYdZhmxL9gMFzrVqzokAvQ')
 app = Flask(__name__)
@@ -17,6 +19,15 @@ def send_telegram_message(chat_id, text, buttons=None):
         data['reply_markup'] = json.dumps({'inline_keyboard': buttons})
     requests.post(url, data=data)
 
+def parse_2gis():
+    """Парсинг 2ГИС для теста"""
+    url = 'https://2gis.ru/krasnoyarsk/firm/70000001103415416/tab/reviews'
+    headers = {'User-Agent': 'Mozilla/5.0'}
+    response = requests.get(url, headers=headers)
+    soup = BeautifulSoup(response.text, 'html.parser')
+    reviews = soup.find_all('div', class_='_1k5soqfl')
+    return len(reviews)
+
 @app.route('/')
 def home():
     return 'Bot is running'
@@ -31,7 +42,8 @@ def webhook():
         
         if text == '/start':
             buttons = [
-                [{'text': '📊 Статистика', 'callback_data': 'stats'}],
+                [{'text': '📊 Статистика', 'callback_data': 'stats'},
+                 {'text': '🔄 Проверить', 'callback_data': 'check'}],
                 [{'text': 'ℹ️ О боте', 'callback_data': 'about'}]
             ]
             send_telegram_message(chat_id, 'Выберите действие:', buttons)
@@ -42,7 +54,12 @@ def webhook():
         data = callback['data']
         
         if data == 'stats':
-            send_telegram_message(chat_id, '📊 Статистика пока пуста')
+            count = parse_2gis()
+            send_telegram_message(chat_id, f'📊 Найдено отзывов: {count}')
+        elif data == 'check':
+            send_telegram_message(chat_id, '🔄 Проверка...')
+            count = parse_2gis()
+            send_telegram_message(chat_id, f'✅ Проверено. Отзывов: {count}')
         elif data == 'about':
             send_telegram_message(chat_id, 'ℹ️ Бот для мониторинга отзывов')
         
