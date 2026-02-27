@@ -2,12 +2,11 @@ import requests
 from bs4 import BeautifulSoup
 import time
 import os
-from flask import Flask, request, jsonify
+from flask import Flask, request
 import schedule
 import threading
 from datetime import datetime
 import json
-import re
 
 # =====================================
 # ТВОИ ДАННЫЕ
@@ -102,7 +101,6 @@ def load_last_reviews():
         return []
 
 def save_last_reviews(reviews):
-    # Храним только последние 10
     if len(reviews) > 10:
         reviews = reviews[-10:]
     with open(LAST_REVIEWS_FILE, 'w', encoding='utf-8') as f:
@@ -124,40 +122,21 @@ def analyze_sentiment(text):
         return '⚪ НЕЙТРАЛЬНЫЙ'
 
 # =====================================
-# ОТПРАВКА В TELEGRAM С КНОПКАМИ
+# ОТПРАВКА В TELEGRAM
 # =====================================
-def send_telegram_message(text, buttons=None):
+def send_telegram_message(chat_id, text, buttons=None):
     url = f'https://api.telegram.org/bot{TG_BOT_TOKEN}/sendMessage'
     data = {
-        'chat_id': TG_CHAT_ID,
+        'chat_id': chat_id,
         'text': text,
         'parse_mode': 'HTML'
     }
     
     if buttons:
-        data['reply_markup'] = json.dumps({
-            'inline_keyboard': buttons
-        })
+        data['reply_markup'] = json.dumps({'inline_keyboard': buttons})
     
     response = requests.post(url, data=data)
     return response.status_code == 200
-
-def send_main_menu():
-    """Отправляет главное меню с кнопками"""
-    buttons = [
-        [{'text': '📊 Статистика', 'callback_data': 'stats'},
-         {'text': '🔄 Проверить сейчас', 'callback_data': 'check'}],
-        [{'text': '📋 Последние отзывы', 'callback_data': 'last'},
-         {'text': 'ℹ️ О боте', 'callback_data': 'about'}]
-    ]
-    
-    message = """<b>🤖 PVZ Монитор</b>
-
-Бот для отслеживания отзывов на пунктах выдачи заказов.
-
-Выберите действие:"""
-    
-    send_telegram_message(message, buttons)
 
 # =====================================
 # ПАРСИНГ 2ГИС
@@ -196,14 +175,13 @@ def check_new_reviews():
         stats['last_week_total'] = stats['total_reviews']
         stats['last_updated'] = today
     
-    # Парсинг 2ГИС
     for url in PVZ_URLS:
         reviews = parse_reviews_from_2gis(url)
         for review in reviews:
             if review['id'] not in sent_reviews:
                 sentiment = analyze_sentiment(review['text'])
                 message = f'📝 НОВЫЙ ОТЗЫВ (2ГИС)\n\n👤 {review["name"]}\n{sentiment}\n📅 {review["date"]}\n\n💬 {review["text"][:200]}\n\n🔗 {review["url"]}'
-                send_telegram_message(message)
+                send_telegram_message(TG_CHAT_ID, message)
                 save_sent_review(review['id'])
                 last_reviews.append(review)
                 new_found = True
@@ -212,7 +190,6 @@ def check_new_reviews():
                 time.sleep(1)
         time.sleep(2)
     
-    # Парсинг Яндекс Карт
     yandex_parser = YandexMapsParser()
     for url in YANDEX_URLS:
         reviews = yandex_parser.fetch_reviews(url)
@@ -220,7 +197,7 @@ def check_new_reviews():
             if review['id'] not in sent_reviews:
                 sentiment = analyze_sentiment(review['text'])
                 message = f'📝 НОВЫЙ ОТЗЫВ (Яндекс)\n\n👤 {review["name"]}\n{sentiment}\n📅 {review["date"]}\n\n💬 {review["text"][:200]}\n\n🔗 {url}'
-                send_telegram_message(message)
+                send_telegram_message(TG_CHAT_ID, message)
                 save_sent_review(review['id'])
                 last_reviews.append(review)
                 new_found = True
@@ -264,85 +241,90 @@ def send_weekly_stats():
 
 Продолжаем мониторинг! 🚀"""
     
-    send_telegram_message(message)
+    send_telegram_message(TG_CHAT_ID, message)
     
     stats['weekly_reviews'] = 0
     save_stats(stats)
 
 # =====================================
-# ОБРАБОТКА КОМАНД И КНОПОК
+# WEBHOOK ДЛЯ TELEGRAM
 # =====================================
-def handle_callback(callback_data):
-    """Обрабатывает нажатия на кнопки"""
-    if callback_data == 'stats':
-        stats = load_stats()
-        weekly = stats.get('weekly_reviews', 0)
-        total = stats.get('total_reviews', 0)
-        message = f"""📊 <b>ТЕКУЩАЯ СТАТИСТИКА</b>
+@app.route('/webhook', methods=['POST'])
+def webhook():
+    update = request.get_json()
+    
+    if 'message' in update:
+        chat_id = update['message']['chat']['id']
+        text = update['message'].get('text', '')
+        
+        if text == '/start':
+            buttons = [
+                [{'text': '📊 Статистика', 'callback_data': 'stats'},
+                 {'text': '🔄 Проверить сейчас', 'callback_data': 'check'}],
+                [{'text': '📋 Последние отзывы', 'callback_data': 'last'},
+                 {'text': 'ℹ️ О боте', 'callback_data': 'about'}]
+            ]
+            
+            message = """<b>🤖 PVZ Монитор</b>
 
-📝 За неделю: {weekly}
-📚 Всего: {total}
+Бот для отслеживания отзывов на пунктах выдачи заказов.
+
+Выберите действие:"""
+            
+            send_telegram_message(chat_id, message, buttons)
+            
+    elif 'callback_query' in update:
+        callback = update['callback_query']
+        callback_data = callback['data']
+        chat_id = callback['from']['id']
+        
+        if callback_data == 'stats':
+            stats = load_stats()
+            text = f"""📊 <b>ТЕКУЩАЯ СТАТИСТИКА</b>
+
+📝 За неделю: {stats.get('weekly_reviews', 0)}
+📚 Всего: {stats.get('total_reviews', 0)}
 
 📅 Последнее обновление: {stats.get('last_updated', 'никогда')}"""
-        send_telegram_message(message)
-        
-    elif callback_data == 'check':
-        send_telegram_message("🔄 Запускаю проверку...")
-        result = check_new_reviews()
-        send_telegram_message(f"✅ Проверка завершена. Новых отзывов: {result}")
-        
-    elif callback_data == 'last':
-        last_reviews = load_last_reviews()
-        if not last_reviews:
-            send_telegram_message("📭 Пока нет сохранённых отзывов")
-            return
-        
-        message = "📋 <b>Последние 5 отзывов:</b>\n\n"
-        for i, r in enumerate(last_reviews[-5:], 1):
-            sentiment = analyze_sentiment(r['text'])
-            message += f"{i}. {r['name']} {sentiment}\n   {r['text'][:100]}...\n\n"
-        
-        send_telegram_message(message)
-        
-    elif callback_data == 'about':
-        message = """<b>🤖 PVZ Монитор</b>
+            
+        elif callback_data == 'check':
+            send_telegram_message(chat_id, "🔄 Запускаю проверку...")
+            result = check_new_reviews()
+            text = f"✅ Проверка завершена. Новых отзывов: {result}"
+            
+        elif callback_data == 'last':
+            last_reviews = load_last_reviews()
+            if not last_reviews:
+                text = "📭 Пока нет сохранённых отзывов"
+            else:
+                text = "📋 <b>Последние 5 отзывов:</b>\n\n"
+                for i, r in enumerate(last_reviews[-5:], 1):
+                    sentiment = analyze_sentiment(r['text'])
+                    text += f"{i}. {r['name']} {sentiment}\n   {r['text'][:100]}...\n\n"
+                    
+        else:
+            text = """<b>🤖 PVZ Монитор</b>
 
 Версия: 2.0
 Автор: @MaestroMuzlo
 
 Функции:
 • Мониторинг 2ГИС и Яндекс Карт
-• Анализ тональности отзывов
+• Анализ тональности
 • Еженедельная статистика
 • Удобное меню
 
 Работает 24/7 в облаке 🚀"""
-        send_telegram_message(message)
-
-def process_telegram_updates():
-    """Получает и обрабатывает обновления от Telegram"""
-    url = f'https://api.telegram.org/bot{TG_BOT_TOKEN}/getUpdates'
-    params = {'timeout': 30, 'offset': -1}
-    
-    try:
-        response = requests.get(url, params=params)
-        updates = response.json().get('result', [])
         
-        for update in updates:
-            if 'callback_query' in update:
-                callback = update['callback_query']
-                callback_data = callback['data']
-                handle_callback(callback_data)
-                
-                # Отвечаем на callback
-                answer_url = f'https://api.telegram.org/bot{TG_BOT_TOKEN}/answerCallbackQuery'
-                requests.post(answer_url, json={'callback_query_id': callback['id']})
-                
-    except Exception as e:
-        print(f"Ошибка обработки обновлений: {e}")
+        send_telegram_message(chat_id, text)
+        
+        answer_url = f'https://api.telegram.org/bot{TG_BOT_TOKEN}/answerCallbackQuery'
+        requests.post(answer_url, json={'callback_query_id': callback['id']})
+    
+    return 'OK'
 
 # =====================================
-# FLASK-МАРШРУТЫ
+# ОСНОВНЫЕ МАРШРУТЫ
 # =====================================
 @app.route('/')
 def home():
@@ -358,36 +340,6 @@ def manual_stats():
     send_weekly_stats()
     return 'Weekly stats sent'
 
-@app.route('/menu')
-def send_menu():
-    send_main_menu()
-    return 'Menu sent'
-
-@app.route('/webhook', methods=['POST'])
-def webhook():
-    """Webhook для получения обновлений от Telegram"""
-    update = request.get_json()
-    
-    if 'message' in update:
-        chat_id = update['message']['chat']['id']
-        text = update['message'].get('text', '')
-        
-        if text == '/start':
-            send_main_menu()
-        elif text == '/menu':
-            send_main_menu()
-            
-    elif 'callback_query' in update:
-        callback = update['callback_query']
-        callback_data = callback['data']
-        handle_callback(callback_data)
-        
-        # Отвечаем на callback
-        answer_url = f'https://api.telegram.org/bot{TG_BOT_TOKEN}/answerCallbackQuery'
-        requests.post(answer_url, json={'callback_query_id': callback['id']})
-    
-    return 'OK'
-
 # =====================================
 # ПЛАНИРОВЩИК
 # =====================================
@@ -396,21 +348,10 @@ def run_schedule():
         schedule.run_pending()
         time.sleep(60)
 
-def poll_updates():
-    """Фоновый опрос обновлений (для Railway без webhook)"""
-    while True:
-        try:
-            process_telegram_updates()
-            time.sleep(2)
-        except:
-            time.sleep(5)
-
 if __name__ == '__main__':
     schedule.every().day.at('10:00').do(check_new_reviews)
     schedule.every().sunday.at('20:00').do(send_weekly_stats)
     
-    # Запускаем фоновый опрос обновлений
-    threading.Thread(target=poll_updates, daemon=True).start()
     threading.Thread(target=run_schedule, daemon=True).start()
     
     port = int(os.environ.get('PORT', 8080))
