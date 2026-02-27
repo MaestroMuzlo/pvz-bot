@@ -8,6 +8,8 @@ import threading
 from datetime import datetime
 import json
 import uuid
+import qrcode
+from io import BytesIO
 
 # =====================================
 # ТВОИ ДАННЫЕ
@@ -22,6 +24,7 @@ SENT_REVIEWS_FILE = 'sent_reviews.txt'
 STATS_FILE = 'review_stats.json'
 LAST_REVIEWS_FILE = 'last_reviews.json'
 CLIENTS_FILE = 'clients.json'
+QR_CODES_FILE = 'qr_codes.json'
 
 app = Flask(__name__)
 
@@ -47,6 +50,17 @@ def load_clients():
 def save_clients(clients):
     with open(CLIENTS_FILE, 'w', encoding='utf-8') as f:
         json.dump(clients, f, ensure_ascii=False, indent=2)
+
+def load_qr_codes():
+    try:
+        with open(QR_CODES_FILE, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except FileNotFoundError:
+        return {}
+
+def save_qr_codes(qr_codes):
+    with open(QR_CODES_FILE, 'w', encoding='utf-8') as f:
+        json.dump(qr_codes, f, ensure_ascii=False, indent=2)
 
 def load_sent_reviews():
     try:
@@ -171,6 +185,39 @@ def send_telegram_message(chat_id, text, buttons=None):
     
     requests.post(url, data=data)
 
+def send_telegram_photo(chat_id, photo_bytes, caption=None):
+    url = f'https://api.telegram.org/bot{TG_BOT_TOKEN}/sendPhoto'
+    files = {'photo': photo_bytes}
+    data = {'chat_id': chat_id}
+    if caption:
+        data['caption'] = caption
+    requests.post(url, files=files, data=data)
+
+# =====================================
+# QR-КОДЫ
+# =====================================
+def generate_qr_code(client_id):
+    """Генерирует уникальный QR-код для клиента"""
+    qr_data = f"https://t.me/{(TG_BOT_TOKEN.split(':')[0])}_bot?start=qr_{client_id}"
+    
+    qr = qrcode.QRCode(
+        version=1,
+        box_size=10,
+        border=5
+    )
+    qr.add_data(qr_data)
+    qr.make(fit=True)
+    
+    img = qr.make_image(fill_color="black", back_color="white")
+    
+    # Сохраняем в байты
+    bio = BytesIO()
+    bio.name = 'qr.png'
+    img.save(bio, 'PNG')
+    bio.seek(0)
+    
+    return bio
+
 # =====================================
 # ОСНОВНАЯ ПРОВЕРКА НОВЫХ ОТЗЫВОВ
 # =====================================
@@ -281,6 +328,27 @@ def webhook():
             text = update['message'].get('text', '')
             
             if text == '/start':
+                # Проверяем, не с QR ли кодом пришли
+                if len(text.split()) > 1:
+                    arg = text.split()[1]
+                    if arg.startswith('qr_'):
+                        client_id = arg[3:]
+                        # Сохраняем связь клиента с QR
+                        qr_codes = load_qr_codes()
+                        qr_codes[str(chat_id)] = {'client_id': client_id, 'scanned_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+                        save_qr_codes(qr_codes)
+                        
+                        buttons = [
+                            [{'text': '⭐ 1', 'callback_data': 'rate_1'},
+                             {'text': '⭐ 2', 'callback_data': 'rate_2'},
+                             {'text': '⭐ 3', 'callback_data': 'rate_3'}],
+                            [{'text': '⭐ 4', 'callback_data': 'rate_4'},
+                             {'text': '⭐ 5', 'callback_data': 'rate_5'}]
+                        ]
+                        send_telegram_message(chat_id, "Оцените качество обслуживания:", buttons)
+                        return 'OK', 200
+                
+                # Обычный старт
                 buttons = [
                     [{'text': '📊 Статистика', 'callback_data': 'stats'},
                      {'text': '🔄 Проверить сейчас', 'callback_data': 'check'}],
@@ -304,6 +372,27 @@ def webhook():
             callback_data = callback['data']
             chat_id = callback['from']['id']
             
+            # Обработка оценок от QR
+            if callback_data.startswith('rate_'):
+                rating = int(callback_data.split('_')[1])
+                qr_codes = load_qr_codes()
+                
+                if rating >= 4:
+                    # Хорошая оценка - предлагаем написать отзыв
+                    buttons = [
+                        [{'text': '2ГИС', 'url': 'https://2gis.ru/krasnoyarsk/firm/70000001103415416/tab/reviews'},
+                         {'text': 'Яндекс Карты', 'url': 'https://yandex.ru/maps/org/ozon/87014746999/reviews/'}]
+                    ]
+                    send_telegram_message(chat_id, "Спасибо за высокую оценку! Оставьте отзыв на одной из площадок:", buttons)
+                else:
+                    # Плохая оценка - отправляем админу
+                    admin_msg = f"⚠️ <b>НЕГАТИВНЫЙ ОТЗЫВ ПО QR</b>\n\nКлиент (ID: {chat_id}) поставил оценку: {rating}"
+                    send_telegram_message(TG_ADMIN_ID, admin_msg)
+                    send_telegram_message(chat_id, "Спасибо за обратную связь! Мы обязательно учтём ваше мнение.")
+                
+                return 'OK', 200
+            
+            # Обычные callback'и
             if callback_data == 'admin':
                 if str(chat_id) != TG_ADMIN_ID:
                     send_telegram_message(chat_id, "⛔ Нет доступа")
@@ -312,6 +401,7 @@ def webhook():
                         [{'text': '➕ Добавить клиента', 'callback_data': 'admin_add'}],
                         [{'text': '📋 Список клиентов', 'callback_data': 'admin_list'}],
                         [{'text': '🗑️ Удалить клиента', 'callback_data': 'admin_delete'}],
+                        [{'text': '📱 QR-коды', 'callback_data': 'admin_qr'}],
                         [{'text': '🔙 Главное меню', 'callback_data': 'main_menu'}]
                     ]
                     message = """<b>👑 АДМИН-ПАНЕЛЬ</b>
@@ -320,8 +410,36 @@ def webhook():
 
 ➕ Добавить нового клиента
 📋 Посмотреть всех подключённых
-🗑️ Удалить клиента"""
+🗑️ Удалить клиента
+📱 Управление QR-кодами"""
                     send_telegram_message(chat_id, message, buttons)
+                    
+            elif callback_data == 'admin_qr':
+                if str(chat_id) != TG_ADMIN_ID:
+                    send_telegram_message(chat_id, "⛔ Нет доступа")
+                else:
+                    buttons = [
+                        [{'text': '📱 Мой QR-код', 'callback_data': 'qr_my'}],
+                        [{'text': '📊 Статистика QR', 'callback_data': 'qr_stats'}],
+                        [{'text': '🔙 Назад', 'callback_data': 'admin'}]
+                    ]
+                    send_telegram_message(chat_id, "Управление QR-кодами:", buttons)
+                    
+            elif callback_data == 'qr_my':
+                if str(chat_id) != TG_ADMIN_ID:
+                    send_telegram_message(chat_id, "⛔ Нет доступа")
+                else:
+                    qr_img = generate_qr_code('admin')
+                    send_telegram_photo(chat_id, qr_img.read(), "Ваш QR-код для сбора отзывов. Распечатайте и разместите на видном месте!")
+                    
+            elif callback_data == 'qr_stats':
+                if str(chat_id) != TG_ADMIN_ID:
+                    send_telegram_message(chat_id, "⛔ Нет доступа")
+                else:
+                    qr_codes = load_qr_codes()
+                    total_scans = len(qr_codes)
+                    text = f"📊 <b>СТАТИСТИКА QR-КОДОВ</b>\n\nВсего сканирований: {total_scans}"
+                    send_telegram_message(chat_id, text)
                     
             elif callback_data == 'admin_add':
                 if str(chat_id) != TG_ADMIN_ID:
@@ -385,6 +503,7 @@ def webhook():
 • ⚡ Мгновенно присылает уведомления о новых отзывах
 • 🎯 Анализирует тональность (негатив/позитив)
 • 📊 Еженедельная статистика в Telegram
+• 📱 Сбор отзывов через QR-код
 
 <b>Для кого:</b>
 Владельцы ПВЗ, кафе, магазинов, салонов красоты, автомастерских — любого бизнеса с точками на карте.
@@ -394,6 +513,7 @@ def webhook():
 ✅ Оперативная реакция на проблемы клиентов
 ✅ Полный контроль репутации 24/7
 ✅ Работает в облаке — не нужен ваш компьютер
+✅ QR-код для мгновенного сбора отзывов
 
 <b>🚀 Готовы подключить ваш бизнес?</b>
 👉 @MaestroMuzlo"""
@@ -462,6 +582,10 @@ def run_schedule():
         time.sleep(60)
 
 if __name__ == '__main__':
+    # Инициализация
+    load_clients()
+    load_qr_codes()
+    
     schedule.every().day.at('10:00').do(check_new_reviews)
     schedule.every().sunday.at('20:00').do(send_weekly_stats)
     
