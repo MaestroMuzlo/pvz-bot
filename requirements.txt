@@ -4,3 +4,4 @@ flask
 schedule
 qrcode
 pillow
+gunicorn
