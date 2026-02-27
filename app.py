@@ -5,21 +5,250 @@ import os
 from flask import Flask, request
 import schedule
 import threading
-from datetime import datetime
+from datetime import datetime, timedelta
 import json
+import psycopg2
+from psycopg2.extras import RealDictCursor
+import uuid
 
 # =====================================
 # ТВОИ ДАННЫЕ
 # =====================================
 TG_BOT_TOKEN = os.environ.get('TG_BOT_TOKEN', '8764632286:AAFRLvCGrXC1siYdZhmxL9gMFzrVqzokAvQ')
-TG_ADMIN_ID = os.environ.get('TG_ADMIN_ID', '5434465388')  # Твой Telegram ID
-
-SENT_REVIEWS_FILE = 'sent_reviews.txt'
-STATS_FILE = 'review_stats.json'
-LAST_REVIEWS_FILE = 'last_reviews.json'
-CLIENTS_FILE = 'clients.json'  # Файл с клиентами
+TG_ADMIN_ID = os.environ.get('TG_ADMIN_ID', '5434465388')
+DATABASE_URL = os.environ.get('DATABASE_URL')
 
 app = Flask(__name__)
+
+# =====================================
+# ПОДКЛЮЧЕНИЕ К БАЗЕ ДАННЫХ
+# =====================================
+def get_db():
+    conn = psycopg2.connect(DATABASE_URL)
+    return conn
+
+def init_db():
+    """Создаёт таблицы, если их нет"""
+    conn = get_db()
+    cur = conn.cursor()
+    
+    # Таблица клиентов
+    cur.execute('''
+        CREATE TABLE IF NOT EXISTS clients (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            chat_id TEXT NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            trial_until TIMESTAMP,
+            is_active BOOLEAN DEFAULT TRUE
+        )
+    ''')
+    
+    # Таблица ПВЗ (у клиента может быть несколько)
+    cur.execute('''
+        CREATE TABLE IF NOT EXISTS pvz (
+            id TEXT PRIMARY KEY,
+            client_id TEXT REFERENCES clients(id) ON DELETE CASCADE,
+            name TEXT NOT NULL,
+            url_2gis TEXT,
+            url_yandex TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    
+    # Таблица отзывов
+    cur.execute('''
+        CREATE TABLE IF NOT EXISTS reviews (
+            id TEXT PRIMARY KEY,
+            pvz_id TEXT REFERENCES pvz(id) ON DELETE CASCADE,
+            author_name TEXT,
+            text TEXT,
+            rating INTEGER,
+            date TIMESTAMP,
+            sentiment TEXT,
+            source TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    
+    # Таблица подписок
+    cur.execute('''
+        CREATE TABLE IF NOT EXISTS subscriptions (
+            id TEXT PRIMARY KEY,
+            client_id TEXT REFERENCES clients(id) ON DELETE CASCADE,
+            start_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            end_date TIMESTAMP,
+            is_active BOOLEAN DEFAULT TRUE,
+            payment_amount INTEGER,
+            payment_method TEXT
+        )
+    ''')
+    
+    conn.commit()
+    cur.close()
+    conn.close()
+    
+    print("✅ База данных инициализирована")
+
+# =====================================
+# ФУНКЦИИ ДЛЯ РАБОТЫ С КЛИЕНТАМИ
+# =====================================
+def add_client(chat_id, name, trial_days=7):
+    """Добавляет нового клиента с пробным периодом"""
+    client_id = str(uuid.uuid4())[:8]
+    trial_until = datetime.now() + timedelta(days=trial_days)
+    
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute(
+        "INSERT INTO clients (id, name, chat_id, trial_until) VALUES (%s, %s, %s, %s)",
+        (client_id, name, chat_id, trial_until)
+    )
+    conn.commit()
+    cur.close()
+    conn.close()
+    
+    return client_id
+
+def get_client_by_chat_id(chat_id):
+    """Получает клиента по chat_id"""
+    conn = get_db()
+    cur = conn.cursor(cursor_factory=RealDictCursor)
+    cur.execute("SELECT * FROM clients WHERE chat_id = %s", (chat_id,))
+    client = cur.fetchone()
+    cur.close()
+    conn.close()
+    return client
+
+def get_all_clients():
+    """Получает всех активных клиентов"""
+    conn = get_db()
+    cur = conn.cursor(cursor_factory=RealDictCursor)
+    cur.execute("SELECT * FROM clients WHERE is_active = TRUE")
+    clients = cur.fetchall()
+    cur.close()
+    conn.close()
+    return clients
+
+def check_subscription(chat_id):
+    """Проверяет, активна ли подписка у клиента"""
+    client = get_client_by_chat_id(chat_id)
+    if not client:
+        return False
+    
+    # Если нет trial_until — бессрочно (для админа)
+    if not client['trial_until']:
+        return True
+    
+    # Проверяем, не истёк ли пробный период
+    return client['trial_until'] > datetime.now()
+
+# =====================================
+# ФУНКЦИИ ДЛЯ ПВЗ
+# =====================================
+def add_pvz(client_id, name, url_2gis=None, url_yandex=None):
+    """Добавляет ПВЗ клиенту"""
+    pvz_id = str(uuid.uuid4())[:8]
+    
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute(
+        "INSERT INTO pvz (id, client_id, name, url_2gis, url_yandex) VALUES (%s, %s, %s, %s, %s)",
+        (pvz_id, client_id, name, url_2gis, url_yandex)
+    )
+    conn.commit()
+    cur.close()
+    conn.close()
+    
+    return pvz_id
+
+def get_client_pvz(client_id):
+    """Получает все ПВЗ клиента"""
+    conn = get_db()
+    cur = conn.cursor(cursor_factory=RealDictCursor)
+    cur.execute("SELECT * FROM pvz WHERE client_id = %s", (client_id,))
+    pvz_list = cur.fetchall()
+    cur.close()
+    conn.close()
+    return pvz_list
+
+def get_all_pvz():
+    """Получает все ПВЗ всех клиентов"""
+    conn = get_db()
+    cur = conn.cursor(cursor_factory=RealDictCursor)
+    cur.execute("""
+        SELECT p.*, c.chat_id, c.name as client_name 
+        FROM pvz p 
+        JOIN clients c ON p.client_id = c.id 
+        WHERE c.is_active = TRUE
+    """)
+    pvz_list = cur.fetchall()
+    cur.close()
+    conn.close()
+    return pvz_list
+
+# =====================================
+# ФУНКЦИИ ДЛЯ ОТЗЫВОВ
+# =====================================
+def save_review(pvz_id, author_name, text, rating, date, sentiment, source):
+    """Сохраняет отзыв в базу"""
+    review_id = str(uuid.uuid4())[:8]
+    
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute(
+        """INSERT INTO reviews (id, pvz_id, author_name, text, rating, date, sentiment, source) 
+           VALUES (%s, %s, %s, %s, %s, %s, %s, %s)""",
+        (review_id, pvz_id, author_name, text, rating, date, sentiment, source)
+    )
+    conn.commit()
+    cur.close()
+    conn.close()
+    
+    return review_id
+
+def get_last_reviews(limit=10):
+    """Получает последние отзывы"""
+    conn = get_db()
+    cur = conn.cursor(cursor_factory=RealDictCursor)
+    cur.execute("""
+        SELECT r.*, p.name as pvz_name, c.name as client_name 
+        FROM reviews r 
+        JOIN pvz p ON r.pvz_id = p.id 
+        JOIN clients c ON p.client_id = c.id 
+        ORDER BY r.created_at DESC LIMIT %s
+    """, (limit,))
+    reviews = cur.fetchall()
+    cur.close()
+    conn.close()
+    return reviews
+
+def get_stats():
+    """Получает статистику"""
+    conn = get_db()
+    cur = conn.cursor()
+    
+    cur.execute("SELECT COUNT(*) FROM reviews")
+    total = cur.fetchone()[0]
+    
+    cur.execute("SELECT COUNT(*) FROM reviews WHERE created_at > NOW() - INTERVAL '7 days'")
+    weekly = cur.fetchone()[0]
+    
+    cur.execute("SELECT COUNT(*) FROM clients")
+    clients_count = cur.fetchone()[0]
+    
+    cur.execute("SELECT COUNT(*) FROM pvz")
+    pvz_count = cur.fetchone()[0]
+    
+    cur.close()
+    conn.close()
+    
+    return {
+        'total_reviews': total,
+        'weekly_reviews': weekly,
+        'clients_count': clients_count,
+        'pvz_count': pvz_count
+    }
 
 # =====================================
 # СЛОВАРИ ДЛЯ АНАЛИЗА ТОНАЛЬНОСТИ
@@ -27,80 +256,20 @@ app = Flask(__name__)
 NEGATIVE_WORDS = ['ужас', 'кошмар', 'проблем', 'не работа', 'плох', 'груб', 'хам', 'долг', 'очеред', 'не приш', 'обман', 'брак', 'сломан', 'гряз', 'холодн']
 POSITIVE_WORDS = ['отличн', 'супер', 'спасиб', 'молодец', 'быстр', 'вежлив', 'чист', 'светл', 'уютн', 'классн', 'помог', 'совету', 'доволен']
 
-# =====================================
-# ФУНКЦИИ ДЛЯ РАБОТЫ С ФАЙЛАМИ
-# =====================================
-def load_clients():
-    """Загружает список клиентов"""
-    try:
-        with open(CLIENTS_FILE, 'r', encoding='utf-8') as f:
-            return json.load(f)
-    except FileNotFoundError:
-        # Клиент по умолчанию (ты)
-        default_clients = [
-            {
-                'id': 'client_1',
-                'name': 'Мой ПВЗ (Ладо Кецховели)',
-                'chat_id': TG_ADMIN_ID,
-                'urls': {
-                    '2gis': ['https://2gis.ru/krasnoyarsk/firm/70000001103415416/tab/reviews'],
-                    'yandex': ['https://yandex.ru/maps/org/ozon/87014746999/reviews/']
-                }
-            },
-            {
-                'id': 'client_2',
-                'name': 'Мой ПВЗ (Петра Ломако)',
-                'chat_id': TG_ADMIN_ID,
-                'urls': {
-                    '2gis': ['https://2gis.ru/krasnoyarsk/firm/70000001101179865/tab/reviews'],
-                    'yandex': ['https://yandex.ru/maps/org/ozon/80264119858/reviews/']
-                }
-            }
-        ]
-        save_clients(default_clients)
-        return default_clients
-
-def save_clients(clients):
-    with open(CLIENTS_FILE, 'w', encoding='utf-8') as f:
-        json.dump(clients, f, ensure_ascii=False, indent=2)
-
-def load_sent_reviews():
-    try:
-        with open(SENT_REVIEWS_FILE, 'r', encoding='utf-8') as f:
-            return set(f.read().splitlines())
-    except FileNotFoundError:
-        return set()
-
-def save_sent_review(review_id):
-    with open(SENT_REVIEWS_FILE, 'a', encoding='utf-8') as f:
-        f.write(review_id + '\n')
-
-def load_stats():
-    try:
-        with open(STATS_FILE, 'r', encoding='utf-8') as f:
-            return json.load(f)
-    except FileNotFoundError:
-        return {'total_reviews': 0, 'weekly_reviews': 0, 'last_week_total': 0, 'last_updated': None}
-
-def save_stats(stats):
-    with open(STATS_FILE, 'w', encoding='utf-8') as f:
-        json.dump(stats, f, ensure_ascii=False, indent=2)
-
-def load_last_reviews():
-    try:
-        with open(LAST_REVIEWS_FILE, 'r', encoding='utf-8') as f:
-            return json.load(f)
-    except FileNotFoundError:
-        return []
-
-def save_last_reviews(reviews):
-    if len(reviews) > 10:
-        reviews = reviews[-10:]
-    with open(LAST_REVIEWS_FILE, 'w', encoding='utf-8') as f:
-        json.dump(reviews, f, ensure_ascii=False, indent=2)
+def analyze_sentiment(text):
+    text_lower = text.lower()
+    is_negative = any(word in text_lower for word in NEGATIVE_WORDS)
+    is_positive = any(word in text_lower for word in POSITIVE_WORDS)
+    
+    if is_negative:
+        return 'negative'
+    elif is_positive:
+        return 'positive'
+    else:
+        return 'neutral'
 
 # =====================================
-# КЛАССЫ ДЛЯ ПАРСЕРОВ
+# ПАРСЕРЫ
 # =====================================
 class YandexMapsParser:
     def parse_reviews_from_html(self, html):
@@ -119,8 +288,7 @@ class YandexMapsParser:
                 text = text_elem.text.strip() if text_elem else ''
                 date_elem = block.find('span', class_='business-review-view__date')
                 date = date_elem.text.strip() if date_elem else ''
-                review_id = f'ya_{name}_{date}_{text[:30]}'
-                reviews.append({'id': review_id, 'name': name, 'text': text, 'date': date, 'source': 'yandex'})
+                reviews.append({'name': name, 'text': text, 'date': date, 'source': 'yandex'})
             except:
                 continue
         return reviews
@@ -132,20 +300,24 @@ class YandexMapsParser:
             return self.parse_reviews_from_html(response.text)
         return []
 
-# =====================================
-# АНАЛИЗ ТОНАЛЬНОСТИ
-# =====================================
-def analyze_sentiment(text):
-    text_lower = text.lower()
-    is_negative = any(word in text_lower for word in NEGATIVE_WORDS)
-    is_positive = any(word in text_lower for word in POSITIVE_WORDS)
-    
-    if is_negative:
-        return '🔴 НЕГАТИВНЫЙ'
-    elif is_positive:
-        return '🟢 ПОЗИТИВНЫЙ'
-    else:
-        return '⚪ НЕЙТРАЛЬНЫЙ'
+def parse_reviews_from_2gis(url):
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+    response = requests.get(url, headers=headers)
+    soup = BeautifulSoup(response.text, 'html.parser')
+    reviews = []
+    review_blocks = soup.find_all('div', class_='_1k5soqfl')
+    for block in review_blocks:
+        try:
+            name_elem = block.find('span', class_='_16s5yj36')
+            name = name_elem.text if name_elem else 'Аноним'
+            text_elem = block.find('a', class_='_1msln3t') or block.find('a', class_='_1wlx08h')
+            text = text_elem.text if text_elem else ''
+            date_elem = block.find('div', class_='_1evjsdb')
+            date = date_elem.text if date_elem else ''
+            reviews.append({'name': name, 'text': text, 'date': date, 'source': '2gis', 'url': url})
+        except:
+            continue
+    return reviews
 
 # =====================================
 # ОТПРАВКА В TELEGRAM
@@ -165,147 +337,91 @@ def send_telegram_message(chat_id, text, buttons=None):
     return response.status_code == 200
 
 # =====================================
-# ПАРСИНГ 2ГИС
+# ОСНОВНАЯ ПРОВЕРКА НОВЫХ ОТЗЫВОВ
 # =====================================
-def parse_reviews_from_2gis(url):
-    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
-    response = requests.get(url, headers=headers)
-    soup = BeautifulSoup(response.text, 'html.parser')
-    reviews = []
-    review_blocks = soup.find_all('div', class_='_1k5soqfl')
-    for block in review_blocks:
-        try:
-            name_elem = block.find('span', class_='_16s5yj36')
-            name = name_elem.text if name_elem else 'Аноним'
-            text_elem = block.find('a', class_='_1msln3t') or block.find('a', class_='_1wlx08h')
-            text = text_elem.text if text_elem else ''
-            date_elem = block.find('div', class_='_1evjsdb')
-            date = date_elem.text if date_elem else ''
-            review_id = f'{name}_{date}_{text[:30]}'
-            reviews.append({'id': review_id, 'name': name, 'text': text, 'date': date, 'url': url})
-        except:
+def check_all_reviews():
+    """Проверяет отзывы для всех ПВЗ"""
+    all_pvz = get_all_pvz()
+    yandex_parser = YandexMapsParser()
+    
+    for pvz in all_pvz:
+        chat_id = pvz['chat_id']
+        
+        # Проверяем подписку
+        if not check_subscription(chat_id):
             continue
-    return reviews
-
-# =====================================
-# ОСНОВНАЯ ПРОВЕРКА НОВЫХ ОТЗЫВОВ ДЛЯ ВСЕХ КЛИЕНТОВ
-# =====================================
-def check_all_clients():
-    """Проверяет отзывы для всех клиентов"""
-    clients = load_clients()
-    sent_reviews = load_sent_reviews()
-    stats = load_stats()
-    today = datetime.now().strftime('%Y-%m-%d')
-    last_reviews = load_last_reviews()
-    
-    if stats['last_updated'] != today:
-        stats['last_week_total'] = stats['total_reviews']
-        stats['last_updated'] = today
-    
-    for client in clients:
-        chat_id = client['chat_id']
-        client_name = client['name']
         
         # 2ГИС
-        for url in client['urls'].get('2gis', []):
-            reviews = parse_reviews_from_2gis(url)
+        if pvz['url_2gis']:
+            reviews = parse_reviews_from_2gis(pvz['url_2gis'])
             for review in reviews:
-                if review['id'] not in sent_reviews:
-                    sentiment = analyze_sentiment(review['text'])
-                    message = f'📝 <b>НОВЫЙ ОТЗЫВ</b> для {client_name}\n\n👤 {review["name"]}\n{sentiment}\n📅 {review["date"]}\n\n💬 {review["text"][:200]}\n\n🔗 {review["url"]}'
-                    send_telegram_message(chat_id, message)
-                    save_sent_review(review['id'])
-                    last_reviews.append(review)
-                    stats['total_reviews'] += 1
-                    stats['weekly_reviews'] += 1
-                    time.sleep(1)
-            time.sleep(2)
+                sentiment = analyze_sentiment(review['text'])
+                # TODO: проверять, есть ли уже в базе
+                message = f'📝 <b>НОВЫЙ ОТЗЫВ</b> для {pvz["client_name"]} - {pvz["name"]}\n\n👤 {review["name"]}\n{sentiment}\n📅 {review["date"]}\n\n💬 {review["text"][:200]}\n\n🔗 {pvz["url_2gis"]}'
+                send_telegram_message(chat_id, message)
+                time.sleep(1)
         
         # Яндекс
-        yandex_parser = YandexMapsParser()
-        for url in client['urls'].get('yandex', []):
-            reviews = yandex_parser.fetch_reviews(url)
+        if pvz['url_yandex']:
+            reviews = yandex_parser.fetch_reviews(pvz['url_yandex'])
             for review in reviews:
-                if review['id'] not in sent_reviews:
-                    sentiment = analyze_sentiment(review['text'])
-                    message = f'📝 <b>НОВЫЙ ОТЗЫВ (Яндекс)</b> для {client_name}\n\n👤 {review["name"]}\n{sentiment}\n📅 {review["date"]}\n\n💬 {review["text"][:200]}\n\n🔗 {url}'
-                    send_telegram_message(chat_id, message)
-                    save_sent_review(review['id'])
-                    last_reviews.append(review)
-                    stats['total_reviews'] += 1
-                    stats['weekly_reviews'] += 1
-                    time.sleep(1)
-            time.sleep(2)
-    
-    save_stats(stats)
-    save_last_reviews(last_reviews)
+                sentiment = analyze_sentiment(review['text'])
+                message = f'📝 <b>НОВЫЙ ОТЗЫВ (Яндекс)</b> для {pvz["client_name"]} - {pvz["name"]}\n\n👤 {review["name"]}\n{sentiment}\n📅 {review["date"]}\n\n💬 {review["text"][:200]}\n\n🔗 {pvz["url_yandex"]}'
+                send_telegram_message(chat_id, message)
+                time.sleep(1)
+        
+        time.sleep(2)
 
 # =====================================
-# ЕЖЕНЕДЕЛЬНАЯ СТАТИСТИКА ДЛЯ ВСЕХ
+# ЕЖЕНЕДЕЛЬНАЯ СТАТИСТИКА
 # =====================================
 def send_weekly_stats():
-    stats = load_stats()
-    weekly = stats.get('weekly_reviews', 0)
-    total = stats.get('total_reviews', 0)
-    last_week = stats.get('last_week_total', 0)
-    clients = load_clients()
-    
-    if last_week > 0:
-        change = weekly - last_week
-        if change > 0:
-            trend = f'📈 +{change} (больше чем на прошлой неделе)'
-        elif change < 0:
-            trend = f'📉 {change} (меньше чем на прошлой неделе)'
-        else:
-            trend = '➖ Столько же, как на прошлой неделе'
-    else:
-        trend = '📊 Это первая неделя мониторинга'
+    """Отправляет статистику всем клиентам"""
+    clients = get_all_clients()
+    stats = get_stats()
     
     for client in clients:
-        message = f"""📊 <b>ЕЖЕНЕДЕЛЬНАЯ СТАТИСТИКА</b> для {client['name']}
+        if not check_subscription(client['chat_id']):
+            continue
+            
+        message = f"""📊 <b>ЕЖЕНЕДЕЛЬНАЯ СТАТИСТИКА</b>
 
 📅 Неделя: {datetime.now().strftime('%d.%m.%Y')}
 
-📝 Всего отзывов за неделю: {weekly}
-📚 Всего отзывов за всё время: {total}
-
-{trend}
+📝 Всего отзывов за неделю: {stats['weekly_reviews']}
+📚 Всего отзывов за всё время: {stats['total_reviews']}
 
 Продолжаем мониторинг! 🚀"""
         
         send_telegram_message(client['chat_id'], message)
-    
-    stats['weekly_reviews'] = 0
-    save_stats(stats)
 
 # =====================================
-# АДМИН-ПАНЕЛЬ В TELEGRAM
+# АДМИН-ФУНКЦИИ
 # =====================================
 def show_admin_menu(chat_id):
-    """Показывает админ-меню"""
     if str(chat_id) != TG_ADMIN_ID:
-        send_telegram_message(chat_id, "⛔ У вас нет прав администратора")
         return
     
     buttons = [
-        [{'text': '➕ Добавить клиента', 'callback_data': 'admin_add'}],
+        [{'text': '📊 Общая статистика', 'callback_data': 'admin_stats'}],
         [{'text': '📋 Список клиентов', 'callback_data': 'admin_list'}],
-        [{'text': '🗑️ Удалить клиента', 'callback_data': 'admin_delete'}],
+        [{'text': '➕ Добавить клиента', 'callback_data': 'admin_add'}],
         [{'text': '🔙 Главное меню', 'callback_data': 'main_menu'}]
     ]
     
-    message = """<b>👑 АДМИН-ПАНЕЛЬ</b>
+    stats = get_stats()
+    message = f"""<b>👑 АДМИН-ПАНЕЛЬ</b>
 
-Управление клиентами бота:
-
-➕ Добавить нового клиента
-📋 Посмотреть всех подключённых
-🗑️ Удалить клиента"""
+📊 Статистика:
+• Клиентов: {stats['clients_count']}
+• ПВЗ: {stats['pvz_count']}
+• Отзывов: {stats['total_reviews']}
+• За неделю: {stats['weekly_reviews']}"""
     
     send_telegram_message(chat_id, message, buttons)
 
 # =====================================
-# WEBHOOK ДЛЯ TELEGRAM
+# WEBHOOK
 # =====================================
 @app.route('/webhook', methods=['POST'])
 def webhook():
@@ -316,22 +432,39 @@ def webhook():
         text = update['message'].get('text', '')
         
         if text == '/start':
-            buttons = [
-                [{'text': '📊 Статистика', 'callback_data': 'stats'},
-                 {'text': '🔄 Проверить сейчас', 'callback_data': 'check'}],
-                [{'text': '📋 Последние отзывы', 'callback_data': 'last'},
-                 {'text': 'ℹ️ О боте', 'callback_data': 'about'}]
-            ]
+            # Проверяем, есть ли клиент
+            client = get_client_by_chat_id(chat_id)
             
-            # Если это админ, добавляем кнопку админки
-            if str(chat_id) == TG_ADMIN_ID:
-                buttons.append([{'text': '👑 Админ-панель', 'callback_data': 'admin'}])
-            
-            message = """<b>🔍 МОНИТОРИНГ ОТЗЫВОВ ВАШЕГО БИЗНЕСА</b>
+            if client:
+                buttons = [
+                    [{'text': '📊 Статистика', 'callback_data': 'stats'},
+                     {'text': '🔄 Проверить сейчас', 'callback_data': 'check'}],
+                    [{'text': '📋 Мои отзывы', 'callback_data': 'my_reviews'},
+                     {'text': 'ℹ️ О боте', 'callback_data': 'about'}]
+                ]
+                
+                # Если админ
+                if str(chat_id) == TG_ADMIN_ID:
+                    buttons.append([{'text': '👑 Админ-панель', 'callback_data': 'admin'}])
+                
+                message = f"""<b>🔍 МОНИТОРИНГ ОТЗЫВОВ</b>
+
+Добро пожаловать, {client['name']}!"""
+                
+            else:
+                # Новый пользователь
+                buttons = [
+                    [{'text': '✅ Бесплатный тест на 7 дней', 'callback_data': 'trial'}],
+                    [{'text': 'ℹ️ О боте', 'callback_data': 'about'}]
+                ]
+                message = """<b>🔍 МОНИТОРИНГ ОТЗЫВОВ ВАШЕГО БИЗНЕСА</b>
 
 Бот отслеживает отзывы о ваших точках в 2ГИС и Яндекс Картах.
 
-Выберите действие:"""
+🔹 Бесплатный тест-драйв на 7 дней
+🔹 Мгновенные уведомления
+🔹 Анализ тональности
+🔹 Еженедельная статистика"""
             
             send_telegram_message(chat_id, message, buttons)
             
@@ -340,124 +473,97 @@ def webhook():
         callback_data = callback['data']
         chat_id = callback['from']['id']
         
-        # Админ-функции
         if callback_data == 'admin':
             show_admin_menu(chat_id)
             
-        elif callback_data == 'admin_add':
-            if str(chat_id) != TG_ADMIN_ID:
-                send_telegram_message(chat_id, "⛔ Нет доступа")
-            else:
-                send_telegram_message(chat_id, "✏️ Введите данные клиента в формате:\n\n<code>Название\nСсылка на 2ГИС\nСсылка на Яндекс</code>\n\n(можно пропустить ссылку, поставив прочерк -)")
-                # Здесь нужно будет добавить обработку ответа
-                
+        elif callback_data == 'admin_stats':
+            stats = get_stats()
+            text = f"""📊 <b>ПОЛНАЯ СТАТИСТИКА</b>
+
+👥 Клиентов: {stats['clients_count']}
+📍 ПВЗ: {stats['pvz_count']}
+📝 Всего отзывов: {stats['total_reviews']}
+📅 За неделю: {stats['weekly_reviews']}"""
+            send_telegram_message(chat_id, text)
+            
         elif callback_data == 'admin_list':
-            if str(chat_id) != TG_ADMIN_ID:
-                send_telegram_message(chat_id, "⛔ Нет доступа")
+            clients = get_all_clients()
+            if not clients:
+                text = "📭 Клиентов пока нет"
             else:
-                clients = load_clients()
-                if not clients:
-                    text = "📭 Клиентов пока нет"
-                else:
-                    text = "📋 <b>Список клиентов:</b>\n\n"
-                    for i, client in enumerate(clients, 1):
-                        text += f"{i}. {client['name']}\n   🆔 {client['id']}\n   💬 Chat ID: {client['chat_id']}\n\n"
-                send_telegram_message(chat_id, text)
-                
-        elif callback_data == 'admin_delete':
-            if str(chat_id) != TG_ADMIN_ID:
-                send_telegram_message(chat_id, "⛔ Нет доступа")
-            else:
-                clients = load_clients()
-                if not clients:
-                    send_telegram_message(chat_id, "📭 Клиентов нет")
-                else:
-                    buttons = []
-                    for client in clients:
-                        buttons.append([{'text': f"❌ {client['name']}", 'callback_data': f"del_{client['id']}"}])
-                    buttons.append([{'text': '🔙 Назад', 'callback_data': 'admin'}])
-                    send_telegram_message(chat_id, "🗑️ Выберите клиента для удаления:", buttons)
-                    
-        elif callback_data.startswith('del_'):
-            if str(chat_id) != TG_ADMIN_ID:
-                send_telegram_message(chat_id, "⛔ Нет доступа")
-            else:
-                client_id = callback_data[4:]
-                clients = load_clients()
-                clients = [c for c in clients if c['id'] != client_id]
-                save_clients(clients)
-                send_telegram_message(chat_id, f"✅ Клиент удалён")
-                show_admin_menu(chat_id)
-                
+                text = "📋 <b>Список клиентов:</b>\n\n"
+                for c in clients:
+                    text += f"• {c['name']} (ID: {c['id']})\n  До: {c['trial_until']}\n\n"
+            send_telegram_message(chat_id, text)
+            
+        elif callback_data == 'trial':
+            # Добавляем клиента с пробным периодом
+            name = f"Клиент {chat_id}"
+            client_id = add_client(chat_id, name)
+            text = f"""✅ <b>Пробный период активирован!</b>
+
+7 дней бесплатного мониторинга.
+
+Теперь добавьте ваши ПВЗ, отправив ссылки в формате:
+<code>Название ПВЗ
+https://2gis.ru/...
+https://yandex.ru/maps/...</code>"""
+            send_telegram_message(chat_id, text)
+            
         elif callback_data == 'main_menu':
             # Возврат в главное меню
+            client = get_client_by_chat_id(chat_id)
             buttons = [
                 [{'text': '📊 Статистика', 'callback_data': 'stats'},
                  {'text': '🔄 Проверить сейчас', 'callback_data': 'check'}],
-                [{'text': '📋 Последние отзывы', 'callback_data': 'last'},
+                [{'text': '📋 Мои отзывы', 'callback_data': 'my_reviews'},
                  {'text': 'ℹ️ О боте', 'callback_data': 'about'}]
             ]
             if str(chat_id) == TG_ADMIN_ID:
                 buttons.append([{'text': '👑 Админ-панель', 'callback_data': 'admin'}])
             
-            message = """<b>🔍 МОНИТОРИНГ ОТЗЫВОВ ВАШЕГО БИЗНЕСА</b>
-
-Бот отслеживает отзывы о ваших точках в 2ГИС и Яндекс Картах.
-
-Выберите действие:"""
+            send_telegram_message(chat_id, f"Главное меню", buttons)
             
-            send_telegram_message(chat_id, message, buttons)
+        elif callback_data == 'about':
+            text = """<b>🔍 МОНИТОРИНГ ОТЗЫВОВ</b>
+
+<b>Что делает бот:</b>
+• 📍 Отслеживает отзывы в 2ГИС и Яндекс Картах
+• ⚡ Мгновенные уведомления
+• 🎯 Анализ тональности
+• 📊 Еженедельная статистика
+
+<b>Тарифы:</b>
+• 7 дней бесплатно
+• Далее 500₽/мес
+
+<b>🚀 Подключить бизнес:</b>
+👉 @MaestroMuzlo"""
+            send_telegram_message(chat_id, text)
             
-        # Обычные функции
         elif callback_data == 'stats':
-            stats = load_stats()
-            text = f"""📊 <b>ТЕКУЩАЯ СТАТИСТИКА</b>
+            stats = get_stats()
+            text = f"""📊 <b>СТАТИСТИКА</b>
 
-📝 За неделю: {stats.get('weekly_reviews', 0)}
-📚 Всего: {stats.get('total_reviews', 0)}
-
-📅 Последнее обновление: {stats.get('last_updated', 'никогда')}"""
+📝 За неделю: {stats['weekly_reviews']}
+📚 Всего: {stats['total_reviews']}"""
+            send_telegram_message(chat_id, text)
             
         elif callback_data == 'check':
             send_telegram_message(chat_id, "🔄 Запускаю проверку...")
-            check_all_clients()
+            check_all_reviews()
             text = "✅ Проверка завершена"
+            send_telegram_message(chat_id, text)
             
-        elif callback_data == 'last':
-            last_reviews = load_last_reviews()
+        elif callback_data == 'my_reviews':
+            last_reviews = get_last_reviews(5)
             if not last_reviews:
-                text = "📭 Пока нет сохранённых отзывов"
+                text = "📭 Пока нет отзывов"
             else:
                 text = "📋 <b>Последние 5 отзывов:</b>\n\n"
-                for i, r in enumerate(last_reviews[-5:], 1):
-                    sentiment = analyze_sentiment(r['text'])
-                    text += f"{i}. {r['name']} {sentiment}\n   {r['text'][:100]}...\n\n"
-                    
-        elif callback_data == 'about':
-            text = """<b>🔍 МОНИТОРИНГ ОТЗЫВОВ ВАШЕГО БИЗНЕСА</b>
-
-<b>Что делает бот:</b>
-• 📍 Отслеживает отзывы о ваших точках в <b>2ГИС</b> и <b>Яндекс Картах</b>
-• ⚡ Мгновенно присылает уведомления о новых отзывах
-• 🎯 Анализирует тональность (негатив/позитив)
-• 📊 Еженедельная статистика в Telegram
-
-<b>Для кого:</b>
-Владельцы ПВЗ, кафе, магазинов, салонов красоты, автомастерских — любого бизнеса с точками на карте.
-
-<b>Преимущества:</b>
-✅ Не пропустите ни одного негативного отзыва
-✅ Оперативная реакция на проблемы клиентов
-✅ Полный контроль репутации 24/7
-✅ Работает в облаке — не нужен ваш компьютер
-
-<b>🚀 Готовы подключить ваш бизнес?</b>
-👉 @MaestroMuzlo"""
-        
-        else:
-            text = "Команда не распознана"
-        
-        if callback_data not in ['admin', 'admin_add', 'admin_list', 'admin_delete', 'main_menu']:
+                for r in last_reviews:
+                    sentiment_emoji = '🔴' if r['sentiment'] == 'negative' else '🟢' if r['sentiment'] == 'positive' else '⚪'
+                    text += f"{sentiment_emoji} {r['author_name']}\n   {r['text'][:100]}...\n\n"
             send_telegram_message(chat_id, text)
         
         # Отвечаем на callback
@@ -475,13 +581,13 @@ def home():
 
 @app.route('/check')
 def manual_check():
-    check_all_clients()
+    check_all_reviews()
     return 'Check completed'
 
 @app.route('/stats')
 def manual_stats():
     send_weekly_stats()
-    return 'Weekly stats sent'
+    return 'Stats sent'
 
 # =====================================
 # ПЛАНИРОВЩИК
@@ -492,7 +598,16 @@ def run_schedule():
         time.sleep(60)
 
 if __name__ == '__main__':
-    schedule.every().day.at('10:00').do(check_all_clients)
+    # Инициализируем базу данных
+    init_db()
+    
+    # Добавляем админа, если его нет
+    admin = get_client_by_chat_id(TG_ADMIN_ID)
+    if not admin:
+        add_client(TG_ADMIN_ID, 'Администратор', trial_days=999)
+        print("✅ Администратор добавлен")
+    
+    schedule.every().day.at('10:00').do(check_all_reviews)
     schedule.every().sunday.at('20:00').do(send_weekly_stats)
     
     threading.Thread(target=run_schedule, daemon=True).start()
