@@ -36,8 +36,11 @@ app = Flask(__name__)
 def load_clients():
     try:
         with open(CLIENTS_FILE, 'r', encoding='utf-8') as f:
-            return json.load(f)
+            data = f.read()
+            print(f"Загружено из файла: {data[:100]}...")
+            return json.loads(data)
     except FileNotFoundError:
+        print("Файл clients.json не найден")
         default_clients = [
             {
                 'id': 'admin',
@@ -46,22 +49,24 @@ def load_clients():
                 'url_2gis': 'https://2gis.ru/krasnoyarsk/firm/70000001103415416/tab/reviews',
                 'url_yandex': 'https://yandex.ru/maps/org/ozon/87014746999/reviews/',
                 'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-            },
-            {
-                'id': 'client2',
-                'name': 'ПВЗ Петра Ломако',
-                'chat_id': TG_ADMIN_ID,
-                'url_2gis': 'https://2gis.ru/krasnoyarsk/firm/70000001101179865/tab/reviews',
-                'url_yandex': 'https://yandex.ru/maps/org/ozon/80264119858/reviews/',
-                'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
             }
         ]
         save_clients(default_clients)
         return default_clients
+    except json.JSONDecodeError as e:
+        print(f"Ошибка парсинга JSON: {e}")
+        return []
+    except Exception as e:
+        print(f"Неизвестная ошибка: {e}")
+        return []
 
 def save_clients(clients):
-    with open(CLIENTS_FILE, 'w', encoding='utf-8') as f:
-        json.dump(clients, f, ensure_ascii=False, indent=2)
+    try:
+        with open(CLIENTS_FILE, 'w', encoding='utf-8') as f:
+            json.dump(clients, f, ensure_ascii=False, indent=2)
+        print(f"Сохранено клиентов: {len(clients)}")
+    except Exception as e:
+        print(f"Ошибка сохранения: {e}")
 
 def load_pending_clients():
     try:
@@ -69,10 +74,16 @@ def load_pending_clients():
             return json.load(f)
     except FileNotFoundError:
         return {}
+    except Exception as e:
+        print(f"Ошибка загрузки pending: {e}")
+        return {}
 
 def save_pending_clients(pending):
-    with open(PENDING_CLIENTS_FILE, 'w', encoding='utf-8') as f:
-        json.dump(pending, f, ensure_ascii=False, indent=2)
+    try:
+        with open(PENDING_CLIENTS_FILE, 'w', encoding='utf-8') as f:
+            json.dump(pending, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"Ошибка сохранения pending: {e}")
 
 def load_qr_codes():
     try:
@@ -80,10 +91,16 @@ def load_qr_codes():
             return json.load(f)
     except FileNotFoundError:
         return {}
+    except Exception as e:
+        print(f"Ошибка загрузки QR: {e}")
+        return {}
 
 def save_qr_codes(qr_codes):
-    with open(QR_CODES_FILE, 'w', encoding='utf-8') as f:
-        json.dump(qr_codes, f, ensure_ascii=False, indent=2)
+    try:
+        with open(QR_CODES_FILE, 'w', encoding='utf-8') as f:
+            json.dump(qr_codes, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"Ошибка сохранения QR: {e}")
 
 def load_sent_reviews():
     try:
@@ -206,8 +223,12 @@ def send_telegram_message(chat_id, text, buttons=None):
     if buttons:
         data['reply_markup'] = json.dumps({'inline_keyboard': buttons})
     
-    response = requests.post(url, data=data)
-    return response.status_code == 200
+    try:
+        response = requests.post(url, data=data)
+        return response.status_code == 200
+    except Exception as e:
+        print(f"Ошибка отправки: {e}")
+        return False
 
 def send_telegram_photo(chat_id, photo_bytes, caption=None):
     url = f'https://api.telegram.org/bot{TG_BOT_TOKEN}/sendPhoto'
@@ -215,7 +236,10 @@ def send_telegram_photo(chat_id, photo_bytes, caption=None):
     data = {'chat_id': chat_id}
     if caption:
         data['caption'] = caption
-    requests.post(url, files=files, data=data)
+    try:
+        requests.post(url, files=files, data=data)
+    except Exception as e:
+        print(f"Ошибка отправки фото: {e}")
 
 # =====================================
 # QR-КОДЫ
@@ -252,6 +276,8 @@ def check_new_reviews():
     last_reviews = load_last_reviews()
     clients = load_clients()
     
+    print(f"Проверка отзывов для {len(clients)} клиентов")
+    
     if stats['last_updated'] != today:
         stats['last_week_total'] = stats['total_reviews']
         stats['last_updated'] = today
@@ -261,41 +287,50 @@ def check_new_reviews():
             continue  # админа не мониторим как отдельного клиента
         
         chat_id = client['chat_id']
+        print(f"Проверка для {client['name']} (chat_id: {chat_id})")
         
         # 2ГИС
         if client.get('url_2gis') and client['url_2gis'] != '-':
-            reviews = parse_reviews_from_2gis(client['url_2gis'])
-            for review in reviews:
-                review_id = f"{review['name']}_{review['date']}_{review['text'][:30]}"
-                if review_id not in sent_reviews:
-                    sentiment = analyze_sentiment(review['text'])
-                    message = f'📝 <b>НОВЫЙ ОТЗЫВ</b> для {client["name"]}\n\n👤 {review["name"]}\n{sentiment}\n📅 {review["date"]}\n\n💬 {review["text"][:200]}\n\n🔗 {client["url_2gis"]}'
-                    send_telegram_message(chat_id, message)
-                    save_sent_review(review_id)
-                    last_reviews.append(review)
-                    new_found = True
-                    stats['total_reviews'] += 1
-                    stats['weekly_reviews'] += 1
-                    time.sleep(1)
-            time.sleep(2)
+            try:
+                reviews = parse_reviews_from_2gis(client['url_2gis'])
+                print(f"Найдено отзывов в 2ГИС: {len(reviews)}")
+                for review in reviews:
+                    review_id = f"{review['name']}_{review['date']}_{review['text'][:30]}"
+                    if review_id not in sent_reviews:
+                        sentiment = analyze_sentiment(review['text'])
+                        message = f'📝 <b>НОВЫЙ ОТЗЫВ</b> для {client["name"]}\n\n👤 {review["name"]}\n{sentiment}\n📅 {review["date"]}\n\n💬 {review["text"][:200]}\n\n🔗 {client["url_2gis"]}'
+                        send_telegram_message(chat_id, message)
+                        save_sent_review(review_id)
+                        last_reviews.append(review)
+                        new_found = True
+                        stats['total_reviews'] += 1
+                        stats['weekly_reviews'] += 1
+                        time.sleep(1)
+                time.sleep(2)
+            except Exception as e:
+                print(f"Ошибка парсинга 2ГИС для {client['name']}: {e}")
         
         # Яндекс
         if client.get('url_yandex') and client['url_yandex'] != '-':
-            yandex_parser = YandexMapsParser()
-            reviews = yandex_parser.fetch_reviews(client['url_yandex'])
-            for review in reviews:
-                review_id = f"{review['name']}_{review['date']}_{review['text'][:30]}"
-                if review_id not in sent_reviews:
-                    sentiment = analyze_sentiment(review['text'])
-                    message = f'📝 <b>НОВЫЙ ОТЗЫВ (Яндекс)</b> для {client["name"]}\n\n👤 {review["name"]}\n{sentiment}\n📅 {review["date"]}\n\n💬 {review["text"][:200]}\n\n🔗 {client["url_yandex"]}'
-                    send_telegram_message(chat_id, message)
-                    save_sent_review(review_id)
-                    last_reviews.append(review)
-                    new_found = True
-                    stats['total_reviews'] += 1
-                    stats['weekly_reviews'] += 1
-                    time.sleep(1)
-            time.sleep(2)
+            try:
+                yandex_parser = YandexMapsParser()
+                reviews = yandex_parser.fetch_reviews(client['url_yandex'])
+                print(f"Найдено отзывов в Яндексе: {len(reviews)}")
+                for review in reviews:
+                    review_id = f"{review['name']}_{review['date']}_{review['text'][:30]}"
+                    if review_id not in sent_reviews:
+                        sentiment = analyze_sentiment(review['text'])
+                        message = f'📝 <b>НОВЫЙ ОТЗЫВ (Яндекс)</b> для {client["name"]}\n\n👤 {review["name"]}\n{sentiment}\n📅 {review["date"]}\n\n💬 {review["text"][:200]}\n\n🔗 {client["url_yandex"]}'
+                        send_telegram_message(chat_id, message)
+                        save_sent_review(review_id)
+                        last_reviews.append(review)
+                        new_found = True
+                        stats['total_reviews'] += 1
+                        stats['weekly_reviews'] += 1
+                        time.sleep(1)
+                time.sleep(2)
+            except Exception as e:
+                print(f"Ошибка парсинга Яндекс для {client['name']}: {e}")
     
     save_stats(stats)
     save_last_reviews(last_reviews)
@@ -348,6 +383,9 @@ def send_weekly_stats():
 def webhook():
     try:
         update = request.get_json()
+        
+        if not update:
+            return 'OK', 200
         
         if 'message' in update:
             chat_id = update['message']['chat']['id']
@@ -428,7 +466,6 @@ def webhook():
             
             if callback_data.startswith('rate_'):
                 rating = int(callback_data.split('_')[1])
-                qr_codes = load_qr_codes()
                 
                 if rating >= 4:
                     buttons = [
@@ -478,6 +515,8 @@ def webhook():
                     send_telegram_message(chat_id, "⛔ Нет доступа")
                 else:
                     clients = load_clients()
+                    print(f"Загружено клиентов: {len(clients)}")
+                    
                     if len(clients) <= 1:
                         text = "📭 Кроме вас, компаний пока нет"
                     else:
@@ -601,7 +640,7 @@ def webhook():
             requests.post(answer_url, json={'callback_query_id': callback['id']})
     
     except Exception as e:
-        print(f"Ошибка: {e}")
+        print(f"Ошибка в webhook: {e}")
     
     return 'OK', 200
 
@@ -635,6 +674,7 @@ def run_schedule():
         time.sleep(60)
 
 if __name__ == '__main__':
+    # Инициализация
     load_clients()
     load_qr_codes()
     
