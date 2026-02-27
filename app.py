@@ -198,7 +198,7 @@ def send_telegram_photo(chat_id, photo_bytes, caption=None):
 # =====================================
 def generate_qr_code(client_id):
     """Генерирует уникальный QR-код для клиента"""
-    qr_data = f"https://t.me/{(TG_BOT_TOKEN.split(':')[0])}_bot?start=qr_{client_id}"
+    qr_data = f"https://t.me/MyPvzMonitorBot?start=qr_{client_id}"
     
     qr = qrcode.QRCode(
         version=1,
