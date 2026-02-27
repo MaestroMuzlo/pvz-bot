@@ -10,6 +10,7 @@ import json
 import uuid
 import qrcode
 from io import BytesIO
+import re
 
 # =====================================
 # ТВОИ ДАННЫЕ
@@ -25,6 +26,7 @@ STATS_FILE = 'review_stats.json'
 LAST_REVIEWS_FILE = 'last_reviews.json'
 CLIENTS_FILE = 'clients.json'
 QR_CODES_FILE = 'qr_codes.json'
+PENDING_CLIENTS_FILE = 'pending_clients.json'
 
 app = Flask(__name__)
 
@@ -41,6 +43,16 @@ def load_clients():
                 'id': 'admin',
                 'name': 'Администратор',
                 'chat_id': TG_ADMIN_ID,
+                'url_2gis': 'https://2gis.ru/krasnoyarsk/firm/70000001103415416/tab/reviews',
+                'url_yandex': 'https://yandex.ru/maps/org/ozon/87014746999/reviews/',
+                'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            },
+            {
+                'id': 'client2',
+                'name': 'ПВЗ Петра Ломако',
+                'chat_id': TG_ADMIN_ID,
+                'url_2gis': 'https://2gis.ru/krasnoyarsk/firm/70000001101179865/tab/reviews',
+                'url_yandex': 'https://yandex.ru/maps/org/ozon/80264119858/reviews/',
                 'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
             }
         ]
@@ -50,6 +62,17 @@ def load_clients():
 def save_clients(clients):
     with open(CLIENTS_FILE, 'w', encoding='utf-8') as f:
         json.dump(clients, f, ensure_ascii=False, indent=2)
+
+def load_pending_clients():
+    try:
+        with open(PENDING_CLIENTS_FILE, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except FileNotFoundError:
+        return {}
+
+def save_pending_clients(pending):
+    with open(PENDING_CLIENTS_FILE, 'w', encoding='utf-8') as f:
+        json.dump(pending, f, ensure_ascii=False, indent=2)
 
 def load_qr_codes():
     try:
@@ -183,7 +206,8 @@ def send_telegram_message(chat_id, text, buttons=None):
     if buttons:
         data['reply_markup'] = json.dumps({'inline_keyboard': buttons})
     
-    requests.post(url, data=data)
+    response = requests.post(url, data=data)
+    return response.status_code == 200
 
 def send_telegram_photo(chat_id, photo_bytes, caption=None):
     url = f'https://api.telegram.org/bot{TG_BOT_TOKEN}/sendPhoto'
@@ -210,7 +234,6 @@ def generate_qr_code(client_id):
     
     img = qr.make_image(fill_color="black", back_color="white")
     
-    # Сохраняем в байты
     bio = BytesIO()
     bio.name = 'qr.png'
     img.save(bio, 'PNG')
@@ -227,53 +250,52 @@ def check_new_reviews():
     stats = load_stats()
     today = datetime.now().strftime('%Y-%m-%d')
     last_reviews = load_last_reviews()
+    clients = load_clients()
     
     if stats['last_updated'] != today:
         stats['last_week_total'] = stats['total_reviews']
         stats['last_updated'] = today
     
-    PVZ_URLS = [
-        'https://2gis.ru/krasnoyarsk/firm/70000001103415416/tab/reviews',
-        'https://2gis.ru/krasnoyarsk/firm/70000001101179865/tab/reviews'
-    ]
-    
-    YANDEX_URLS = [
-        'https://yandex.ru/maps/org/ozon/87014746999/reviews/',
-        'https://yandex.ru/maps/org/ozon/80264119858/reviews/'
-    ]
-    
-    for url in PVZ_URLS:
-        reviews = parse_reviews_from_2gis(url)
-        for review in reviews:
-            review_id = f"{review['name']}_{review['date']}_{review['text'][:30]}"
-            if review_id not in sent_reviews:
-                sentiment = analyze_sentiment(review['text'])
-                message = f'📝 <b>НОВЫЙ ОТЗЫВ</b>\n\n👤 {review["name"]}\n{sentiment}\n📅 {review["date"]}\n\n💬 {review["text"][:200]}\n\n🔗 {url}'
-                send_telegram_message(TG_ADMIN_ID, message)
-                save_sent_review(review_id)
-                last_reviews.append(review)
-                new_found = True
-                stats['total_reviews'] += 1
-                stats['weekly_reviews'] += 1
-                time.sleep(1)
-        time.sleep(2)
-    
-    yandex_parser = YandexMapsParser()
-    for url in YANDEX_URLS:
-        reviews = yandex_parser.fetch_reviews(url)
-        for review in reviews:
-            review_id = f"{review['name']}_{review['date']}_{review['text'][:30]}"
-            if review_id not in sent_reviews:
-                sentiment = analyze_sentiment(review['text'])
-                message = f'📝 <b>НОВЫЙ ОТЗЫВ (Яндекс)</b>\n\n👤 {review["name"]}\n{sentiment}\n📅 {review["date"]}\n\n💬 {review["text"][:200]}\n\n🔗 {url}'
-                send_telegram_message(TG_ADMIN_ID, message)
-                save_sent_review(review_id)
-                last_reviews.append(review)
-                new_found = True
-                stats['total_reviews'] += 1
-                stats['weekly_reviews'] += 1
-                time.sleep(1)
-        time.sleep(2)
+    for client in clients:
+        if client['id'] == 'admin':
+            continue  # админа не мониторим как отдельного клиента
+        
+        chat_id = client['chat_id']
+        
+        # 2ГИС
+        if client.get('url_2gis') and client['url_2gis'] != '-':
+            reviews = parse_reviews_from_2gis(client['url_2gis'])
+            for review in reviews:
+                review_id = f"{review['name']}_{review['date']}_{review['text'][:30]}"
+                if review_id not in sent_reviews:
+                    sentiment = analyze_sentiment(review['text'])
+                    message = f'📝 <b>НОВЫЙ ОТЗЫВ</b> для {client["name"]}\n\n👤 {review["name"]}\n{sentiment}\n📅 {review["date"]}\n\n💬 {review["text"][:200]}\n\n🔗 {client["url_2gis"]}'
+                    send_telegram_message(chat_id, message)
+                    save_sent_review(review_id)
+                    last_reviews.append(review)
+                    new_found = True
+                    stats['total_reviews'] += 1
+                    stats['weekly_reviews'] += 1
+                    time.sleep(1)
+            time.sleep(2)
+        
+        # Яндекс
+        if client.get('url_yandex') and client['url_yandex'] != '-':
+            yandex_parser = YandexMapsParser()
+            reviews = yandex_parser.fetch_reviews(client['url_yandex'])
+            for review in reviews:
+                review_id = f"{review['name']}_{review['date']}_{review['text'][:30]}"
+                if review_id not in sent_reviews:
+                    sentiment = analyze_sentiment(review['text'])
+                    message = f'📝 <b>НОВЫЙ ОТЗЫВ (Яндекс)</b> для {client["name"]}\n\n👤 {review["name"]}\n{sentiment}\n📅 {review["date"]}\n\n💬 {review["text"][:200]}\n\n🔗 {client["url_yandex"]}'
+                    send_telegram_message(chat_id, message)
+                    save_sent_review(review_id)
+                    last_reviews.append(review)
+                    new_found = True
+                    stats['total_reviews'] += 1
+                    stats['weekly_reviews'] += 1
+                    time.sleep(1)
+            time.sleep(2)
     
     save_stats(stats)
     save_last_reviews(last_reviews)
@@ -287,6 +309,7 @@ def send_weekly_stats():
     weekly = stats.get('weekly_reviews', 0)
     total = stats.get('total_reviews', 0)
     last_week = stats.get('last_week_total', 0)
+    clients = load_clients()
     
     if last_week > 0:
         change = weekly - last_week
@@ -299,7 +322,10 @@ def send_weekly_stats():
     else:
         trend = '📊 Это первая неделя мониторинга'
     
-    message = f"""📊 <b>ЕЖЕНЕДЕЛЬНАЯ СТАТИСТИКА</b>
+    for client in clients:
+        if client['id'] == 'admin':
+            continue
+        message = f"""📊 <b>ЕЖЕНЕДЕЛЬНАЯ СТАТИСТИКА</b> для {client['name']}
 
 📅 Неделя: {datetime.now().strftime('%d.%m.%Y')}
 
@@ -309,8 +335,8 @@ def send_weekly_stats():
 {trend}
 
 Продолжаем мониторинг! 🚀"""
-    
-    send_telegram_message(TG_ADMIN_ID, message)
+        
+        send_telegram_message(client['chat_id'], message)
     
     stats['weekly_reviews'] = 0
     save_stats(stats)
@@ -327,13 +353,42 @@ def webhook():
             chat_id = update['message']['chat']['id']
             text = update['message'].get('text', '')
             
+            # Обработка ответов на добавление клиента
+            pending = load_pending_clients()
+            if str(chat_id) in pending:
+                data = text.strip().split('\n')
+                if len(data) >= 2:
+                    name = data[0].strip()
+                    client_chat_id = data[1].strip()
+                    url_2gis = data[2].strip() if len(data) > 2 and data[2] != '-' else None
+                    url_yandex = data[3].strip() if len(data) > 3 and data[3] != '-' else None
+                    
+                    clients = load_clients()
+                    new_client = {
+                        'id': str(uuid.uuid4())[:8],
+                        'name': name,
+                        'chat_id': client_chat_id,
+                        'url_2gis': url_2gis,
+                        'url_yandex': url_yandex,
+                        'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                    }
+                    clients.append(new_client)
+                    save_clients(clients)
+                    
+                    del pending[str(chat_id)]
+                    save_pending_clients(pending)
+                    
+                    send_telegram_message(chat_id, f"✅ Компания {name} успешно добавлена!")
+                    return 'OK', 200
+                else:
+                    send_telegram_message(chat_id, "❌ Неверный формат. Попробуйте ещё раз:\n\n<code>Название компании\nChat ID\nСсылка на 2ГИС\nСсылка на Яндекс</code>\n\n(если ссылки нет, поставьте прочерк -)")
+                    return 'OK', 200
+            
             if text == '/start':
-                # Проверяем, не с QR ли кодом пришли
                 if len(text.split()) > 1:
                     arg = text.split()[1]
                     if arg.startswith('qr_'):
                         client_id = arg[3:]
-                        # Сохраняем связь клиента с QR
                         qr_codes = load_qr_codes()
                         qr_codes[str(chat_id)] = {'client_id': client_id, 'scanned_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
                         save_qr_codes(qr_codes)
@@ -348,7 +403,6 @@ def webhook():
                         send_telegram_message(chat_id, "Оцените качество обслуживания:", buttons)
                         return 'OK', 200
                 
-                # Обычный старт
                 buttons = [
                     [{'text': '📊 Статистика', 'callback_data': 'stats'},
                      {'text': '🔄 Проверить сейчас', 'callback_data': 'check'}],
@@ -372,35 +426,31 @@ def webhook():
             callback_data = callback['data']
             chat_id = callback['from']['id']
             
-            # Обработка оценок от QR
             if callback_data.startswith('rate_'):
                 rating = int(callback_data.split('_')[1])
                 qr_codes = load_qr_codes()
                 
                 if rating >= 4:
-                    # Хорошая оценка - предлагаем написать отзыв
                     buttons = [
                         [{'text': '2ГИС', 'url': 'https://2gis.ru/krasnoyarsk/firm/70000001103415416/tab/reviews'},
                          {'text': 'Яндекс Карты', 'url': 'https://yandex.ru/maps/org/ozon/87014746999/reviews/'}]
                     ]
                     send_telegram_message(chat_id, "Спасибо за высокую оценку! Оставьте отзыв на одной из площадок:", buttons)
                 else:
-                    # Плохая оценка - отправляем админу
                     admin_msg = f"⚠️ <b>НЕГАТИВНЫЙ ОТЗЫВ ПО QR</b>\n\nКлиент (ID: {chat_id}) поставил оценку: {rating}"
                     send_telegram_message(TG_ADMIN_ID, admin_msg)
                     send_telegram_message(chat_id, "Спасибо за обратную связь! Мы обязательно учтём ваше мнение.")
                 
                 return 'OK', 200
             
-            # Обычные callback'и
             if callback_data == 'admin':
                 if str(chat_id) != TG_ADMIN_ID:
                     send_telegram_message(chat_id, "⛔ Нет доступа")
                 else:
                     buttons = [
-                        [{'text': '➕ Добавить клиента', 'callback_data': 'admin_add'}],
-                        [{'text': '📋 Список клиентов', 'callback_data': 'admin_list'}],
-                        [{'text': '🗑️ Удалить клиента', 'callback_data': 'admin_delete'}],
+                        [{'text': '➕ Добавить компанию', 'callback_data': 'admin_add'}],
+                        [{'text': '📋 Список компаний', 'callback_data': 'admin_list'}],
+                        [{'text': '🗑️ Удалить компанию', 'callback_data': 'admin_delete'}],
                         [{'text': '📱 QR-коды', 'callback_data': 'admin_qr'}],
                         [{'text': '🔙 Главное меню', 'callback_data': 'main_menu'}]
                     ]
@@ -408,11 +458,57 @@ def webhook():
 
 Управление клиентами бота:
 
-➕ Добавить нового клиента
-📋 Посмотреть всех подключённых
-🗑️ Удалить клиента
+➕ Добавить новую компанию
+📋 Посмотреть все компании
+🗑️ Удалить компанию
 📱 Управление QR-кодами"""
                     send_telegram_message(chat_id, message, buttons)
+                    
+            elif callback_data == 'admin_add':
+                if str(chat_id) != TG_ADMIN_ID:
+                    send_telegram_message(chat_id, "⛔ Нет доступа")
+                else:
+                    pending = load_pending_clients()
+                    pending[str(chat_id)] = True
+                    save_pending_clients(pending)
+                    send_telegram_message(chat_id, "✏️ Введите данные новой компании в формате:\n\n<code>Название компании\nChat ID\nСсылка на 2ГИС\nСсылка на Яндекс</code>\n\n(если ссылки нет, поставьте прочерк -)")
+                    
+            elif callback_data == 'admin_list':
+                if str(chat_id) != TG_ADMIN_ID:
+                    send_telegram_message(chat_id, "⛔ Нет доступа")
+                else:
+                    clients = load_clients()
+                    if len(clients) <= 1:
+                        text = "📭 Кроме вас, компаний пока нет"
+                    else:
+                        text = "📋 <b>Список компаний:</b>\n\n"
+                        for c in clients[1:]:  # пропускаем админа
+                            text += f"• {c['name']} (Chat ID: {c['chat_id']})\n  2ГИС: {c.get('url_2gis', '-')[:50]}...\n  Яндекс: {c.get('url_yandex', '-')[:50]}...\n\n"
+                    send_telegram_message(chat_id, text)
+                    
+            elif callback_data == 'admin_delete':
+                if str(chat_id) != TG_ADMIN_ID:
+                    send_telegram_message(chat_id, "⛔ Нет доступа")
+                else:
+                    clients = load_clients()
+                    if len(clients) <= 1:
+                        send_telegram_message(chat_id, "❌ Нет компаний для удаления")
+                    else:
+                        buttons = []
+                        for c in clients[1:]:  # пропускаем админа
+                            buttons.append([{'text': f"❌ {c['name']}", 'callback_data': f"del_{c['id']}"}])
+                        buttons.append([{'text': '🔙 Назад', 'callback_data': 'admin'}])
+                        send_telegram_message(chat_id, "🗑️ Выберите компанию для удаления:", buttons)
+                        
+            elif callback_data.startswith('del_'):
+                if str(chat_id) != TG_ADMIN_ID:
+                    send_telegram_message(chat_id, "⛔ Нет доступа")
+                else:
+                    client_id = callback_data[4:]
+                    clients = load_clients()
+                    clients = [c for c in clients if c['id'] != client_id]
+                    save_clients(clients)
+                    send_telegram_message(chat_id, f"✅ Компания удалена")
                     
             elif callback_data == 'admin_qr':
                 if str(chat_id) != TG_ADMIN_ID:
@@ -440,49 +536,6 @@ def webhook():
                     total_scans = len(qr_codes)
                     text = f"📊 <b>СТАТИСТИКА QR-КОДОВ</b>\n\nВсего сканирований: {total_scans}"
                     send_telegram_message(chat_id, text)
-                    
-            elif callback_data == 'admin_add':
-                if str(chat_id) != TG_ADMIN_ID:
-                    send_telegram_message(chat_id, "⛔ Нет доступа")
-                else:
-                    send_telegram_message(chat_id, "✏️ Функция добавления клиента будет позже")
-                    
-            elif callback_data == 'admin_list':
-                if str(chat_id) != TG_ADMIN_ID:
-                    send_telegram_message(chat_id, "⛔ Нет доступа")
-                else:
-                    clients = load_clients()
-                    if not clients:
-                        text = "📭 Клиентов пока нет"
-                    else:
-                        text = "📋 <b>Список клиентов:</b>\n\n"
-                        for c in clients:
-                            text += f"• {c['name']} (ID: {c['id']})\n  Chat: {c['chat_id']}\n\n"
-                    send_telegram_message(chat_id, text)
-                    
-            elif callback_data == 'admin_delete':
-                if str(chat_id) != TG_ADMIN_ID:
-                    send_telegram_message(chat_id, "⛔ Нет доступа")
-                else:
-                    clients = load_clients()
-                    if len(clients) <= 1:
-                        send_telegram_message(chat_id, "❌ Нельзя удалить последнего клиента")
-                    else:
-                        buttons = []
-                        for c in clients[1:]:  # пропускаем админа
-                            buttons.append([{'text': f"❌ {c['name']}", 'callback_data': f"del_{c['id']}"}])
-                        buttons.append([{'text': '🔙 Назад', 'callback_data': 'admin'}])
-                        send_telegram_message(chat_id, "🗑️ Выберите клиента для удаления:", buttons)
-                        
-            elif callback_data.startswith('del_'):
-                if str(chat_id) != TG_ADMIN_ID:
-                    send_telegram_message(chat_id, "⛔ Нет доступа")
-                else:
-                    client_id = callback_data[4:]
-                    clients = load_clients()
-                    clients = [c for c in clients if c['id'] != client_id]
-                    save_clients(clients)
-                    send_telegram_message(chat_id, f"✅ Клиент удалён")
                     
             elif callback_data == 'main_menu':
                 buttons = [
@@ -582,7 +635,6 @@ def run_schedule():
         time.sleep(60)
 
 if __name__ == '__main__':
-    # Инициализация
     load_clients()
     load_qr_codes()
     
