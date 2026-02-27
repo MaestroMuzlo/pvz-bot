@@ -21,12 +21,33 @@ TG_ADMIN_ID = os.environ.get('TG_ADMIN_ID', '5434465388')
 SENT_REVIEWS_FILE = 'sent_reviews.txt'
 STATS_FILE = 'review_stats.json'
 LAST_REVIEWS_FILE = 'last_reviews.json'
+CLIENTS_FILE = 'clients.json'
 
 app = Flask(__name__)
 
 # =====================================
 # ФУНКЦИИ ДЛЯ РАБОТЫ С ФАЙЛАМИ
 # =====================================
+def load_clients():
+    try:
+        with open(CLIENTS_FILE, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except FileNotFoundError:
+        default_clients = [
+            {
+                'id': 'admin',
+                'name': 'Администратор',
+                'chat_id': TG_ADMIN_ID,
+                'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            }
+        ]
+        save_clients(default_clients)
+        return default_clients
+
+def save_clients(clients):
+    with open(CLIENTS_FILE, 'w', encoding='utf-8') as f:
+        json.dump(clients, f, ensure_ascii=False, indent=2)
+
 def load_sent_reviews():
     try:
         with open(SENT_REVIEWS_FILE, 'r', encoding='utf-8') as f:
@@ -287,33 +308,64 @@ def webhook():
                 if str(chat_id) != TG_ADMIN_ID:
                     send_telegram_message(chat_id, "⛔ Нет доступа")
                 else:
-                    stats = load_stats()
                     buttons = [
-                        [{'text': '📊 Общая статистика', 'callback_data': 'admin_stats'}],
-                        [{'text': '🔄 Ручная проверка', 'callback_data': 'admin_check'}],
+                        [{'text': '➕ Добавить клиента', 'callback_data': 'admin_add'}],
+                        [{'text': '📋 Список клиентов', 'callback_data': 'admin_list'}],
+                        [{'text': '🗑️ Удалить клиента', 'callback_data': 'admin_delete'}],
                         [{'text': '🔙 Главное меню', 'callback_data': 'main_menu'}]
                     ]
-                    message = f"""<b>👑 АДМИН-ПАНЕЛЬ</b>
+                    message = """<b>👑 АДМИН-ПАНЕЛЬ</b>
 
-📊 Статистика:
-• Всего отзывов: {stats['total_reviews']}
-• За неделю: {stats['weekly_reviews']}"""
+Управление клиентами бота:
+
+➕ Добавить нового клиента
+📋 Посмотреть всех подключённых
+🗑️ Удалить клиента"""
                     send_telegram_message(chat_id, message, buttons)
                     
-            elif callback_data == 'admin_stats':
-                stats = load_stats()
-                text = f"""📊 <b>ПОЛНАЯ СТАТИСТИКА</b>
-
-📝 Всего отзывов: {stats['total_reviews']}
-📅 За неделю: {stats['weekly_reviews']}
-📆 Последнее обновление: {stats['last_updated']}"""
-                send_telegram_message(chat_id, text)
-                
-            elif callback_data == 'admin_check':
-                send_telegram_message(chat_id, "🔄 Запускаю проверку...")
-                result = check_new_reviews()
-                send_telegram_message(chat_id, f"✅ Проверка завершена. Новых отзывов: {result}")
-                
+            elif callback_data == 'admin_add':
+                if str(chat_id) != TG_ADMIN_ID:
+                    send_telegram_message(chat_id, "⛔ Нет доступа")
+                else:
+                    send_telegram_message(chat_id, "✏️ Функция добавления клиента будет позже")
+                    
+            elif callback_data == 'admin_list':
+                if str(chat_id) != TG_ADMIN_ID:
+                    send_telegram_message(chat_id, "⛔ Нет доступа")
+                else:
+                    clients = load_clients()
+                    if not clients:
+                        text = "📭 Клиентов пока нет"
+                    else:
+                        text = "📋 <b>Список клиентов:</b>\n\n"
+                        for c in clients:
+                            text += f"• {c['name']} (ID: {c['id']})\n  Chat: {c['chat_id']}\n\n"
+                    send_telegram_message(chat_id, text)
+                    
+            elif callback_data == 'admin_delete':
+                if str(chat_id) != TG_ADMIN_ID:
+                    send_telegram_message(chat_id, "⛔ Нет доступа")
+                else:
+                    clients = load_clients()
+                    if len(clients) <= 1:
+                        send_telegram_message(chat_id, "❌ Нельзя удалить последнего клиента")
+                    else:
+                        buttons = []
+                        for c in clients[1:]:  # пропускаем админа
+                            buttons.append([{'text': f"❌ {c['name']}", 'callback_data': f"del_{c['id']}"}])
+                        buttons.append([{'text': '🔙 Назад', 'callback_data': 'admin'}])
+                        send_telegram_message(chat_id, "🗑️ Выберите клиента для удаления:", buttons)
+                        
+            elif callback_data.startswith('del_'):
+                if str(chat_id) != TG_ADMIN_ID:
+                    send_telegram_message(chat_id, "⛔ Нет доступа")
+                else:
+                    client_id = callback_data[4:]
+                    clients = load_clients()
+                    clients = [c for c in clients if c['id'] != client_id]
+                    save_clients(clients)
+                    send_telegram_message(chat_id, f"✅ Клиент удалён")
+                    
             elif callback_data == 'main_menu':
                 buttons = [
                     [{'text': '📊 Статистика', 'callback_data': 'stats'},
