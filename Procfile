@@ -1,1 +1,1 @@
-﻿web: gunicorn simple_bot:app
+﻿web: gunicorn app:app
