@@ -12,6 +12,7 @@ import qrcode
 from io import BytesIO
 import re
 from topic_analyzer import TopicClassifier
+from flask import Flask, request, jsonify
 
 # =====================================
 # ТВОИ ДАННЫЕ
@@ -970,6 +971,59 @@ def manual_stats():
 @app.route('/test')
 def test():
     return 'Test OK', 200
+# =====================================
+# API ДЛЯ MINI APP "ГОЛОС КЛИЕНТА"
+# =====================================
+@app.route('/api/user/<int:telegram_id>')
+def api_get_user(telegram_id):
+    """Возвращает данные клиента по Telegram ID"""
+    clients = load_clients()
+    for client in clients:
+        if client['chat_id'] == str(telegram_id):
+            return jsonify({
+                'id': client['id'],
+                'name': client['name'],
+                'chat_id': client['chat_id']
+            })
+    return jsonify({'error': 'User not found'}), 404
+
+@app.route('/api/stats/<int:telegram_id>')
+def api_get_stats(telegram_id):
+    """Возвращает статистику для клиента"""
+    stats = load_stats()
+    return jsonify({
+        'total': stats.get('total_reviews', 0),
+        'weekly': stats.get('weekly_reviews', 0),
+        'last_updated': stats.get('last_updated')
+    })
+
+@app.route('/api/reviews/<int:telegram_id>')
+def api_get_reviews(telegram_id):
+    """Возвращает последние отзывы для клиента"""
+    reviews = load_last_reviews()
+    return jsonify(reviews[-10:])
+
+@app.route('/api/settings/<int:telegram_id>')
+def api_get_settings(telegram_id):
+    """Возвращает настройки клиента"""
+    settings = get_client_settings(telegram_id)
+    templates = get_client_templates(telegram_id)
+    return jsonify({
+        'settings': settings,
+        'templates': templates
+    })
+
+@app.route('/api/settings/update', methods=['POST'])
+def api_update_settings():
+    """Обновляет настройки клиента"""
+    data = request.json
+    telegram_id = data.get('telegram_id')
+    settings = data.get('settings', {})
+    
+    for key, value in settings.items():
+        update_client_settings(telegram_id, key, value)
+    
+    return jsonify({'success': True})
 
 # =====================================
 # ПЛАНИРОВЩИК
