@@ -2,7 +2,7 @@ import requests
 from bs4 import BeautifulSoup
 import time
 import os
-from flask import Flask, request
+from flask import Flask, request, jsonify
 import schedule
 import threading
 from datetime import datetime
@@ -12,7 +12,6 @@ import qrcode
 from io import BytesIO
 import re
 from topic_analyzer import TopicClassifier
-from flask import Flask, request, jsonify
 
 # =====================================
 # ТВОИ ДАННЫЕ
@@ -410,7 +409,6 @@ def handle_auto_reply(chat_id, review, sentiment, theme):
     templates = get_client_templates(chat_id)
     default_id = settings.get('default_template', 0)
     
-    # Ищем шаблон по умолчанию
     template = None
     for t in templates:
         if t['id'] == default_id:
@@ -420,11 +418,9 @@ def handle_auto_reply(chat_id, review, sentiment, theme):
     if not template:
         return
     
-    # Подставляем тему
     reply_text = template['text'].replace('{theme}', theme)
     
     if settings.get('reply_mode') == 'auto':
-        # Автоматическая отправка
         log = {
             'chat_id': str(chat_id),
             'review_id': review.get('id', 'unknown'),
@@ -435,12 +431,10 @@ def handle_auto_reply(chat_id, review, sentiment, theme):
         }
         save_reply_log(log)
         
-        # Отправляем уведомление клиенту о том, что ответ отправлен
         notification = f"🤖 <b>Автоответ отправлен</b>\n\nНа отзыв: {review['text'][:100]}...\nОтвет: {reply_text}"
         send_telegram_message(chat_id, notification)
         
     else:
-        # Режим подтверждения
         buttons = [
             [{'text': '✅ Отправить', 'callback_data': f'approve_reply_{review["id"]}'}],
             [{'text': '✏️ Редактировать', 'callback_data': f'edit_reply_{review["id"]}'}],
@@ -500,7 +494,6 @@ def check_new_reviews():
                         message = f'📝 <b>НОВЫЙ ОТЗЫВ</b> для {client["name"]}\n\n👤 {review["name"]}\n{sentiment_emoji} (тема: {topic})\n📅 {review["date"]}\n\n💬 {review["text"][:200]}\n\n🔗 {client["url_2gis"]}'
                         send_telegram_message(chat_id, message)
                         
-                        # Пробуем отправить автоответ
                         review['id'] = review_id
                         handle_auto_reply(chat_id, review, sentiment, topic)
                         
@@ -531,7 +524,6 @@ def check_new_reviews():
                         message = f'📝 <b>НОВЫЙ ОТЗЫВ (Яндекс)</b> для {client["name"]}\n\n👤 {review["name"]}\n{sentiment_emoji} (тема: {topic})\n📅 {review["date"]}\n\n💬 {review["text"][:200]}\n\n🔗 {client["url_yandex"]}'
                         send_telegram_message(chat_id, message)
                         
-                        # Пробуем отправить автоответ
                         review['id'] = review_id
                         handle_auto_reply(chat_id, review, sentiment, topic)
                         
@@ -677,95 +669,6 @@ def webhook():
             callback_data = callback['data']
             chat_id = callback['from']['id']
             
-            # Обработка подтверждения ответов
-            if callback_data.startswith('approve_reply_'):
-                review_id = callback_data.replace('approve_reply_', '')
-                # TODO: отправить ответ
-                send_telegram_message(chat_id, "✅ Ответ отправлен!")
-                return 'OK', 200
-                
-            elif callback_data.startswith('edit_reply_'):
-                review_id = callback_data.replace('edit_reply_', '')
-                send_telegram_message(chat_id, "✏️ Введите новый текст ответа:")
-                return 'OK', 200
-                
-            elif callback_data.startswith('skip_reply_'):
-                review_id = callback_data.replace('skip_reply_', '')
-                send_telegram_message(chat_id, "⏭️ Ответ пропущен")
-                return 'OK', 200
-            
-            # Обработка настроек
-            if callback_data == 'settings':
-                settings = get_client_settings(chat_id)
-                templates = get_client_templates(chat_id)
-                
-                auto_status = '✅ Включены' if settings.get('auto_reply_enabled', False) else '❌ Отключены'
-                mode = 'Автоматический' if settings.get('reply_mode') == 'auto' else 'С подтверждением'
-                
-                # Находим шаблон по умолчанию
-                default_template = 'Не выбран'
-                for t in templates:
-                    if t['id'] == settings.get('default_template', 0):
-                        default_template = t['name']
-                        break
-                
-                buttons = [
-                    [{'text': f"🤖 Автоответы: {auto_status}", 'callback_data': 'toggle_auto_reply'}],
-                    [{'text': f"📝 Режим: {mode}", 'callback_data': 'toggle_reply_mode'}],
-                    [{'text': f"📋 Шаблон: {default_template}", 'callback_data': 'choose_template'}],
-                    [{'text': '➕ Добавить шаблон', 'callback_data': 'add_template'}],
-                    [{'text': '📊 Логи ответов', 'callback_data': 'view_reply_logs'}],
-                    [{'text': '🔙 Назад', 'callback_data': 'main_menu'}]
-                ]
-                
-                send_telegram_message(chat_id, "⚙️ <b>Настройки</b>\n\nУправляйте автоответами на позитивные отзывы:", buttons)
-                
-            elif callback_data == 'toggle_auto_reply':
-                settings = get_client_settings(chat_id)
-                new_value = not settings.get('auto_reply_enabled', False)
-                update_client_settings(chat_id, 'auto_reply_enabled', new_value)
-                send_telegram_message(chat_id, f"✅ Автоответы {'включены' if new_value else 'отключены'}")
-                # Возвращаем в настройки
-                callback_data = 'settings'
-                # Продолжаем выполнение для показа меню
-                
-            elif callback_data == 'toggle_reply_mode':
-                settings = get_client_settings(chat_id)
-                new_mode = 'approval' if settings.get('reply_mode') == 'auto' else 'auto'
-                update_client_settings(chat_id, 'reply_mode', new_mode)
-                send_telegram_message(chat_id, f"✅ Режим изменен на: {'автоматический' if new_mode == 'auto' else 'с подтверждением'}")
-                callback_data = 'settings'
-                
-            elif callback_data == 'choose_template':
-                templates = get_client_templates(chat_id)
-                buttons = []
-                for t in templates:
-                    status = '✅ ' if t.get('is_default', False) else ''
-                    buttons.append([{'text': f"{status}{t['name']}", 'callback_data': f"set_template_{t['id']}"}])
-                buttons.append([{'text': '🔙 Назад', 'callback_data': 'settings'}])
-                send_telegram_message(chat_id, "📋 Выберите шаблон по умолчанию:", buttons)
-                
-            elif callback_data.startswith('set_template_'):
-                template_id = int(callback_data.replace('set_template_', ''))
-                set_default_template(chat_id, template_id)
-                send_telegram_message(chat_id, "✅ Шаблон по умолчанию обновлен")
-                callback_data = 'settings'
-                
-            elif callback_data == 'add_template':
-                send_telegram_message(chat_id, "✏️ Отправьте название и текст нового шаблона в формате:\n\n<code>Название\nТекст ответа</code>\n\nМожно использовать {theme} для подстановки темы")
-                # TODO: сохранять в pending
-                
-            elif callback_data == 'view_reply_logs':
-                logs = get_client_reply_logs(chat_id, 10)
-                if not logs:
-                    text = "📭 Пока нет записей об автоответах"
-                else:
-                    text = "📊 <b>Последние 10 автоответов:</b>\n\n"
-                    for log in logs:
-                        status_emoji = '✅' if log['status'] == 'sent' else '⏳' if log['status'] == 'pending' else '❌'
-                        text += f"{status_emoji} {log['reply_text'][:50]}...\n   {log['created_at']}\n\n"
-                send_telegram_message(chat_id, text)
-            
             if callback_data.startswith('rate_'):
                 rating = int(callback_data.split('_')[1])
                 
@@ -890,6 +793,73 @@ def webhook():
                     buttons.append([{'text': '👑 Админ-панель', 'callback_data': 'admin'}])
                 send_telegram_message(chat_id, "Главное меню", buttons)
                 
+            elif callback_data == 'settings':
+                settings = get_client_settings(chat_id)
+                templates = get_client_templates(chat_id)
+                
+                auto_status = '✅ Включены' if settings.get('auto_reply_enabled', False) else '❌ Отключены'
+                mode = 'Автоматический' if settings.get('reply_mode') == 'auto' else 'С подтверждением'
+                
+                default_template = 'Не выбран'
+                for t in templates:
+                    if t['id'] == settings.get('default_template', 0):
+                        default_template = t['name']
+                        break
+                
+                buttons = [
+                    [{'text': f"🤖 Автоответы: {auto_status}", 'callback_data': 'toggle_auto_reply'}],
+                    [{'text': f"📝 Режим: {mode}", 'callback_data': 'toggle_reply_mode'}],
+                    [{'text': f"📋 Шаблон: {default_template}", 'callback_data': 'choose_template'}],
+                    [{'text': '➕ Добавить шаблон', 'callback_data': 'add_template'}],
+                    [{'text': '📊 Логи ответов', 'callback_data': 'view_reply_logs'}],
+                    [{'text': '🔙 Назад', 'callback_data': 'main_menu'}]
+                ]
+                
+                send_telegram_message(chat_id, "⚙️ <b>Настройки</b>\n\nУправляйте автоответами на позитивные отзывы:", buttons)
+                
+            elif callback_data == 'toggle_auto_reply':
+                settings = get_client_settings(chat_id)
+                new_value = not settings.get('auto_reply_enabled', False)
+                update_client_settings(chat_id, 'auto_reply_enabled', new_value)
+                send_telegram_message(chat_id, f"✅ Автоответы {'включены' if new_value else 'отключены'}")
+                callback_data = 'settings'
+                
+            elif callback_data == 'toggle_reply_mode':
+                settings = get_client_settings(chat_id)
+                new_mode = 'approval' if settings.get('reply_mode') == 'auto' else 'auto'
+                update_client_settings(chat_id, 'reply_mode', new_mode)
+                send_telegram_message(chat_id, f"✅ Режим изменен на: {'автоматический' if new_mode == 'auto' else 'с подтверждением'}")
+                callback_data = 'settings'
+                
+            elif callback_data == 'choose_template':
+                templates = get_client_templates(chat_id)
+                buttons = []
+                for t in templates:
+                    status = '✅ ' if t.get('is_default', False) else ''
+                    buttons.append([{'text': f"{status}{t['name']}", 'callback_data': f"set_template_{t['id']}"}])
+                buttons.append([{'text': '🔙 Назад', 'callback_data': 'settings'}])
+                send_telegram_message(chat_id, "📋 Выберите шаблон по умолчанию:", buttons)
+                
+            elif callback_data.startswith('set_template_'):
+                template_id = int(callback_data.replace('set_template_', ''))
+                set_default_template(chat_id, template_id)
+                send_telegram_message(chat_id, "✅ Шаблон по умолчанию обновлен")
+                callback_data = 'settings'
+                
+            elif callback_data == 'add_template':
+                send_telegram_message(chat_id, "✏️ Отправьте название и текст нового шаблона в формате:\n\n<code>Название\nТекст ответа</code>\n\nМожно использовать {{theme}} для подстановки темы")
+                
+            elif callback_data == 'view_reply_logs':
+                logs = get_client_reply_logs(chat_id, 10)
+                if not logs:
+                    text = "📭 Пока нет записей об автоответах"
+                else:
+                    text = "📊 <b>Последние 10 автоответов:</b>\n\n"
+                    for log in logs:
+                        status_emoji = '✅' if log['status'] == 'sent' else '⏳' if log['status'] == 'pending' else '❌'
+                        text += f"{status_emoji} {log['reply_text'][:50]}...\n   {log['created_at']}\n\n"
+                send_telegram_message(chat_id, text)
+                
             elif callback_data == 'about':
                 text = """<b>🔍 МОНИТОРИНГ ОТЗЫВОВ ВАШЕГО БИЗНЕСА</b>
 
@@ -971,12 +941,7 @@ def manual_stats():
 @app.route('/test')
 def test():
     return 'Test OK', 200
-# =====================================
-# API ДЛЯ MINI APP "ГОЛОС КЛИЕНТА"
-# =====================================
-# =====================================
-# API ДЛЯ MINI APP "ГОЛОС КЛИЕНТА"
-# =====================================
+
 # =====================================
 # API ДЛЯ MINI APP "ГОЛОС КЛИЕНТА"
 # =====================================
@@ -1011,7 +976,6 @@ def api_get_stats(telegram_id):
 def api_get_reviews(telegram_id):
     """Возвращает последние отзывы для клиента"""
     reviews = load_last_reviews()
-    # Здесь можно фильтровать по клиенту, если добавишь поле client_id в отзывы
     return jsonify(reviews[-10:])
 
 @app.route('/api/settings/<telegram_id>')
@@ -1023,6 +987,18 @@ def api_get_settings(telegram_id):
         'settings': settings,
         'templates': templates
     })
+
+@app.route('/api/settings/update', methods=['POST'])
+def api_update_settings():
+    """Обновляет настройки клиента"""
+    data = request.json
+    telegram_id = data.get('telegram_id')
+    settings = data.get('settings', {})
+    
+    for key, value in settings.items():
+        update_client_settings(telegram_id, key, value)
+    
+    return jsonify({'success': True})
 
 # =====================================
 # ПЛАНИРОВЩИК
