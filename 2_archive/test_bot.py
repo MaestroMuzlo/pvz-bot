@@ -1,0 +1,16 @@
+from telegram import Bot
+import asyncio
+
+BOT_TOKEN = '8323544415:AE4y-9wyNhbTd1tm2-eds3WtN1Db38bBXw'
+CHAT_ID = '5434465388'
+
+async def send_message(text):
+    bot = Bot(token=BOT_TOKEN)
+    await bot.send_message(chat_id=CHAT_ID, text=text)
+    print(f'✅ Отправлено: {text}')
+
+async def main():
+    await send_message('Бот запущен и работает!')
+    await send_message('Ждем ответ от Ozon про API для ПВЗ')
+
+asyncio.run(main())

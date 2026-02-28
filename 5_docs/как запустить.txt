@@ -1,0 +1,2 @@
+Как запустить локально: python pvz_reviews_parser.py
+Как проверить облако: https://pvz-bot-production.up.railway.app/check

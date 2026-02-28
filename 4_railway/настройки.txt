@@ -1,0 +1,3 @@
+Домен: https://pvz-bot-production.up.railway.app
+Проверка: /check
+Расписание: каждый день в 10:00
