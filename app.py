@@ -977,21 +977,27 @@ def test():
 # =====================================
 # API ДЛЯ MINI APP "ГОЛОС КЛИЕНТА"
 # =====================================
-@app.route('/api/user/<path:telegram_id>')
+# =====================================
+# API ДЛЯ MINI APP "ГОЛОС КЛИЕНТА"
+# =====================================
+@app.route('/api/user/<telegram_id>')
 def api_get_user(telegram_id):
-    """Возвращает данные клиента по Telegram ID (строка или число)"""
+    """Возвращает данные клиента по Telegram ID"""
     clients = load_clients()
-    telegram_id_str = str(telegram_id)
+    telegram_id_str = str(telegram_id).strip()
+    
     for client in clients:
-        if client['chat_id'] == telegram_id_str:
+        client_id = str(client.get('chat_id', '')).strip()
+        if client_id == telegram_id_str:
             return jsonify({
-                'id': client['id'],
-                'name': client['name'],
-                'chat_id': client['chat_id']
+                'id': client.get('id'),
+                'name': client.get('name'),
+                'chat_id': client.get('chat_id')
             })
+    
     return jsonify({'error': 'User not found'}), 404
 
-@app.route('/api/stats/<path:telegram_id>')
+@app.route('/api/stats/<telegram_id>')
 def api_get_stats(telegram_id):
     """Возвращает статистику для клиента"""
     stats = load_stats()
@@ -1001,13 +1007,14 @@ def api_get_stats(telegram_id):
         'last_updated': stats.get('last_updated')
     })
 
-@app.route('/api/reviews/<path:telegram_id>')
+@app.route('/api/reviews/<telegram_id>')
 def api_get_reviews(telegram_id):
     """Возвращает последние отзывы для клиента"""
     reviews = load_last_reviews()
+    # Здесь можно фильтровать по клиенту, если добавишь поле client_id в отзывы
     return jsonify(reviews[-10:])
 
-@app.route('/api/settings/<path:telegram_id>')
+@app.route('/api/settings/<telegram_id>')
 def api_get_settings(telegram_id):
     """Возвращает настройки клиента"""
     settings = get_client_settings(telegram_id)
