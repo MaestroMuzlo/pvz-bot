@@ -11,12 +11,18 @@ import uuid
 import qrcode
 from io import BytesIO
 import re
+from topic_analyzer import TopicClassifier
 
 # =====================================
 # ТВОИ ДАННЫЕ
 # =====================================
 TG_BOT_TOKEN = os.environ.get('TG_BOT_TOKEN', '8764632286:AAFRLvCGrXC1siYdZhmxL9gMFzrVqzokAvQ')
 TG_ADMIN_ID = os.environ.get('TG_ADMIN_ID', '5434465388')
+
+# =====================================
+# ИНИЦИАЛИЗАЦИЯ AI-АНАЛИЗАТОРА
+# =====================================
+topic_classifier = TopicClassifier(eps=0.5, min_samples=2)
 
 # =====================================
 # ФАЙЛЫ ДЛЯ ХРАНЕНИЯ ДАННЫХ
@@ -27,6 +33,9 @@ LAST_REVIEWS_FILE = 'last_reviews.json'
 CLIENTS_FILE = 'clients.json'
 QR_CODES_FILE = 'qr_codes.json'
 PENDING_CLIENTS_FILE = 'pending_clients.json'
+SETTINGS_FILE = 'client_settings.json'
+TEMPLATES_FILE = 'templates.json'
+REPLY_LOGS_FILE = 'reply_logs.json'
 
 app = Flask(__name__)
 
@@ -67,6 +76,119 @@ def save_clients(clients):
         print(f"Сохранено клиентов: {len(clients)}")
     except Exception as e:
         print(f"Ошибка сохранения: {e}")
+
+def load_client_settings():
+    try:
+        with open(SETTINGS_FILE, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except FileNotFoundError:
+        return {}
+
+def save_client_settings(settings):
+    with open(SETTINGS_FILE, 'w', encoding='utf-8') as f:
+        json.dump(settings, f, ensure_ascii=False, indent=2)
+
+def get_client_settings(chat_id):
+    settings = load_client_settings()
+    if str(chat_id) not in settings:
+        settings[str(chat_id)] = {
+            'auto_reply_enabled': False,
+            'reply_mode': 'auto',
+            'default_template': 0
+        }
+        save_client_settings(settings)
+    return settings[str(chat_id)]
+
+def update_client_settings(chat_id, key, value):
+    settings = load_client_settings()
+    if str(chat_id) not in settings:
+        settings[str(chat_id)] = {
+            'auto_reply_enabled': False,
+            'reply_mode': 'auto',
+            'default_template': 0
+        }
+    settings[str(chat_id)][key] = value
+    save_client_settings(settings)
+
+def load_templates():
+    try:
+        with open(TEMPLATES_FILE, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except FileNotFoundError:
+        return {}
+
+def save_templates(templates):
+    with open(TEMPLATES_FILE, 'w', encoding='utf-8') as f:
+        json.dump(templates, f, ensure_ascii=False, indent=2)
+
+def get_client_templates(chat_id):
+    templates = load_templates()
+    if str(chat_id) not in templates:
+        templates[str(chat_id)] = [
+            {
+                'id': 0,
+                'name': 'Базовый',
+                'text': 'Спасибо за отзыв! Рады, что вам понравилось. Ждем вас снова! 🙌',
+                'is_default': True
+            },
+            {
+                'id': 1,
+                'name': 'С темой',
+                'text': 'Спасибо! Особенно ценно, что вы оценили {theme}. Это помогает нам становиться лучше! 🌟',
+                'is_default': False
+            }
+        ]
+        save_templates(templates)
+    return templates[str(chat_id)]
+
+def add_template(chat_id, name, text):
+    templates = load_templates()
+    if str(chat_id) not in templates:
+        templates[str(chat_id)] = []
+    
+    new_id = len(templates[str(chat_id)])
+    templates[str(chat_id)].append({
+        'id': new_id,
+        'name': name,
+        'text': text,
+        'is_default': False
+    })
+    save_templates(templates)
+    return new_id
+
+def delete_template(chat_id, template_id):
+    templates = load_templates()
+    if str(chat_id) in templates:
+        templates[str(chat_id)] = [t for t in templates[str(chat_id)] if t['id'] != template_id]
+        save_templates(templates)
+
+def set_default_template(chat_id, template_id):
+    templates = load_templates()
+    if str(chat_id) in templates:
+        for t in templates[str(chat_id)]:
+            t['is_default'] = (t['id'] == template_id)
+        save_templates(templates)
+        update_client_settings(chat_id, 'default_template', template_id)
+
+def load_reply_logs():
+    try:
+        with open(REPLY_LOGS_FILE, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except FileNotFoundError:
+        return []
+
+def save_reply_log(log):
+    logs = load_reply_logs()
+    logs.append(log)
+    if len(logs) > 100:
+        logs = logs[-100:]
+    with open(REPLY_LOGS_FILE, 'w', encoding='utf-8') as f:
+        json.dump(logs, f, ensure_ascii=False, indent=2)
+
+def get_client_reply_logs(chat_id, limit=10):
+    logs = load_reply_logs()
+    client_logs = [l for l in logs if l['chat_id'] == str(chat_id)]
+    return client_logs[-limit:]
 
 def load_pending_clients():
     try:
@@ -154,6 +276,14 @@ def analyze_sentiment(text):
         return 'positive'
     else:
         return 'neutral'
+
+def get_sentiment_emoji(sentiment):
+    if sentiment == 'negative':
+        return '🔴 НЕГАТИВНЫЙ'
+    elif sentiment == 'positive':
+        return '🟢 ПОЗИТИВНЫЙ'
+    else:
+        return '⚪ НЕЙТРАЛЬНЫЙ'
 
 # =====================================
 # ПАРСЕР 2ГИС
@@ -245,7 +375,6 @@ def send_telegram_photo(chat_id, photo_bytes, caption=None):
 # QR-КОДЫ
 # =====================================
 def generate_qr_code(client_id):
-    """Генерирует уникальный QR-код для клиента"""
     qr_data = f"https://t.me/MyPvzMonitorBot?start=qr_{client_id}"
     
     qr = qrcode.QRCode(
@@ -266,6 +395,71 @@ def generate_qr_code(client_id):
     return bio
 
 # =====================================
+# ФУНКЦИЯ ДЛЯ АВТООТВЕТОВ
+# =====================================
+def handle_auto_reply(chat_id, review, sentiment, theme):
+    """Обрабатывает автоответ на позитивный отзыв"""
+    if sentiment != 'positive':
+        return
+    
+    settings = get_client_settings(chat_id)
+    if not settings.get('auto_reply_enabled', False):
+        return
+    
+    templates = get_client_templates(chat_id)
+    default_id = settings.get('default_template', 0)
+    
+    # Ищем шаблон по умолчанию
+    template = None
+    for t in templates:
+        if t['id'] == default_id:
+            template = t
+            break
+    
+    if not template:
+        return
+    
+    # Подставляем тему
+    reply_text = template['text'].replace('{theme}', theme)
+    
+    if settings.get('reply_mode') == 'auto':
+        # Автоматическая отправка
+        log = {
+            'chat_id': str(chat_id),
+            'review_id': review.get('id', 'unknown'),
+            'template_id': template['id'],
+            'reply_text': reply_text,
+            'status': 'sent',
+            'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        }
+        save_reply_log(log)
+        
+        # Отправляем уведомление клиенту о том, что ответ отправлен
+        notification = f"🤖 <b>Автоответ отправлен</b>\n\nНа отзыв: {review['text'][:100]}...\nОтвет: {reply_text}"
+        send_telegram_message(chat_id, notification)
+        
+    else:
+        # Режим подтверждения
+        buttons = [
+            [{'text': '✅ Отправить', 'callback_data': f'approve_reply_{review["id"]}'}],
+            [{'text': '✏️ Редактировать', 'callback_data': f'edit_reply_{review["id"]}'}],
+            [{'text': '❌ Пропустить', 'callback_data': f'skip_reply_{review["id"]}'}]
+        ]
+        
+        msg = f"✏️ <b>Требуется подтверждение ответа</b>\n\nНа отзыв: {review['text'][:200]}\n\nПредлагаю ответить:\n{reply_text}"
+        send_telegram_message(chat_id, msg, buttons)
+        
+        log = {
+            'chat_id': str(chat_id),
+            'review_id': review['id'],
+            'template_id': template['id'],
+            'reply_text': reply_text,
+            'status': 'pending',
+            'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        }
+        save_reply_log(log)
+
+# =====================================
 # ОСНОВНАЯ ПРОВЕРКА НОВЫХ ОТЗЫВОВ
 # =====================================
 def check_new_reviews():
@@ -284,12 +478,11 @@ def check_new_reviews():
     
     for client in clients:
         if client['id'] == 'admin':
-            continue  # админа не мониторим как отдельного клиента
+            continue
         
         chat_id = client['chat_id']
         print(f"Проверка для {client['name']} (chat_id: {chat_id})")
         
-        # 2ГИС
         if client.get('url_2gis') and client['url_2gis'] != '-':
             try:
                 reviews = parse_reviews_from_2gis(client['url_2gis'])
@@ -298,8 +491,18 @@ def check_new_reviews():
                     review_id = f"{review['name']}_{review['date']}_{review['text'][:30]}"
                     if review_id not in sent_reviews:
                         sentiment = analyze_sentiment(review['text'])
-                        message = f'📝 <b>НОВЫЙ ОТЗЫВ</b> для {client["name"]}\n\n👤 {review["name"]}\n{sentiment}\n📅 {review["date"]}\n\n💬 {review["text"][:200]}\n\n🔗 {client["url_2gis"]}'
+                        sentiment_emoji = get_sentiment_emoji(sentiment)
+                        
+                        last_texts = [r['text'] for r in last_reviews[-20:]]
+                        topic = topic_classifier.predict(review['text'], last_texts)
+                        
+                        message = f'📝 <b>НОВЫЙ ОТЗЫВ</b> для {client["name"]}\n\n👤 {review["name"]}\n{sentiment_emoji} (тема: {topic})\n📅 {review["date"]}\n\n💬 {review["text"][:200]}\n\n🔗 {client["url_2gis"]}'
                         send_telegram_message(chat_id, message)
+                        
+                        # Пробуем отправить автоответ
+                        review['id'] = review_id
+                        handle_auto_reply(chat_id, review, sentiment, topic)
+                        
                         save_sent_review(review_id)
                         last_reviews.append(review)
                         new_found = True
@@ -310,7 +513,6 @@ def check_new_reviews():
             except Exception as e:
                 print(f"Ошибка парсинга 2ГИС для {client['name']}: {e}")
         
-        # Яндекс
         if client.get('url_yandex') and client['url_yandex'] != '-':
             try:
                 yandex_parser = YandexMapsParser()
@@ -320,8 +522,18 @@ def check_new_reviews():
                     review_id = f"{review['name']}_{review['date']}_{review['text'][:30]}"
                     if review_id not in sent_reviews:
                         sentiment = analyze_sentiment(review['text'])
-                        message = f'📝 <b>НОВЫЙ ОТЗЫВ (Яндекс)</b> для {client["name"]}\n\n👤 {review["name"]}\n{sentiment}\n📅 {review["date"]}\n\n💬 {review["text"][:200]}\n\n🔗 {client["url_yandex"]}'
+                        sentiment_emoji = get_sentiment_emoji(sentiment)
+                        
+                        last_texts = [r['text'] for r in last_reviews[-20:]]
+                        topic = topic_classifier.predict(review['text'], last_texts)
+                        
+                        message = f'📝 <b>НОВЫЙ ОТЗЫВ (Яндекс)</b> для {client["name"]}\n\n👤 {review["name"]}\n{sentiment_emoji} (тема: {topic})\n📅 {review["date"]}\n\n💬 {review["text"][:200]}\n\n🔗 {client["url_yandex"]}'
                         send_telegram_message(chat_id, message)
+                        
+                        # Пробуем отправить автоответ
+                        review['id'] = review_id
+                        handle_auto_reply(chat_id, review, sentiment, topic)
+                        
                         save_sent_review(review_id)
                         last_reviews.append(review)
                         new_found = True
@@ -391,7 +603,6 @@ def webhook():
             chat_id = update['message']['chat']['id']
             text = update['message'].get('text', '')
             
-            # Обработка ответов на добавление клиента
             pending = load_pending_clients()
             if str(chat_id) in pending:
                 data = text.strip().split('\n')
@@ -445,7 +656,8 @@ def webhook():
                     [{'text': '📊 Статистика', 'callback_data': 'stats'},
                      {'text': '🔄 Проверить сейчас', 'callback_data': 'check'}],
                     [{'text': '📋 Последние отзывы', 'callback_data': 'last'},
-                     {'text': 'ℹ️ О боте', 'callback_data': 'about'}]
+                     {'text': '⚙️ Настройки', 'callback_data': 'settings'}],
+                    [{'text': 'ℹ️ О боте', 'callback_data': 'about'}]
                 ]
                 
                 if str(chat_id) == TG_ADMIN_ID:
@@ -463,6 +675,95 @@ def webhook():
             callback = update['callback_query']
             callback_data = callback['data']
             chat_id = callback['from']['id']
+            
+            # Обработка подтверждения ответов
+            if callback_data.startswith('approve_reply_'):
+                review_id = callback_data.replace('approve_reply_', '')
+                # TODO: отправить ответ
+                send_telegram_message(chat_id, "✅ Ответ отправлен!")
+                return 'OK', 200
+                
+            elif callback_data.startswith('edit_reply_'):
+                review_id = callback_data.replace('edit_reply_', '')
+                send_telegram_message(chat_id, "✏️ Введите новый текст ответа:")
+                return 'OK', 200
+                
+            elif callback_data.startswith('skip_reply_'):
+                review_id = callback_data.replace('skip_reply_', '')
+                send_telegram_message(chat_id, "⏭️ Ответ пропущен")
+                return 'OK', 200
+            
+            # Обработка настроек
+            if callback_data == 'settings':
+                settings = get_client_settings(chat_id)
+                templates = get_client_templates(chat_id)
+                
+                auto_status = '✅ Включены' if settings.get('auto_reply_enabled', False) else '❌ Отключены'
+                mode = 'Автоматический' if settings.get('reply_mode') == 'auto' else 'С подтверждением'
+                
+                # Находим шаблон по умолчанию
+                default_template = 'Не выбран'
+                for t in templates:
+                    if t['id'] == settings.get('default_template', 0):
+                        default_template = t['name']
+                        break
+                
+                buttons = [
+                    [{'text': f"🤖 Автоответы: {auto_status}", 'callback_data': 'toggle_auto_reply'}],
+                    [{'text': f"📝 Режим: {mode}", 'callback_data': 'toggle_reply_mode'}],
+                    [{'text': f"📋 Шаблон: {default_template}", 'callback_data': 'choose_template'}],
+                    [{'text': '➕ Добавить шаблон', 'callback_data': 'add_template'}],
+                    [{'text': '📊 Логи ответов', 'callback_data': 'view_reply_logs'}],
+                    [{'text': '🔙 Назад', 'callback_data': 'main_menu'}]
+                ]
+                
+                send_telegram_message(chat_id, "⚙️ <b>Настройки</b>\n\nУправляйте автоответами на позитивные отзывы:", buttons)
+                
+            elif callback_data == 'toggle_auto_reply':
+                settings = get_client_settings(chat_id)
+                new_value = not settings.get('auto_reply_enabled', False)
+                update_client_settings(chat_id, 'auto_reply_enabled', new_value)
+                send_telegram_message(chat_id, f"✅ Автоответы {'включены' if new_value else 'отключены'}")
+                # Возвращаем в настройки
+                callback_data = 'settings'
+                # Продолжаем выполнение для показа меню
+                
+            elif callback_data == 'toggle_reply_mode':
+                settings = get_client_settings(chat_id)
+                new_mode = 'approval' if settings.get('reply_mode') == 'auto' else 'auto'
+                update_client_settings(chat_id, 'reply_mode', new_mode)
+                send_telegram_message(chat_id, f"✅ Режим изменен на: {'автоматический' if new_mode == 'auto' else 'с подтверждением'}")
+                callback_data = 'settings'
+                
+            elif callback_data == 'choose_template':
+                templates = get_client_templates(chat_id)
+                buttons = []
+                for t in templates:
+                    status = '✅ ' if t.get('is_default', False) else ''
+                    buttons.append([{'text': f"{status}{t['name']}", 'callback_data': f"set_template_{t['id']}"}])
+                buttons.append([{'text': '🔙 Назад', 'callback_data': 'settings'}])
+                send_telegram_message(chat_id, "📋 Выберите шаблон по умолчанию:", buttons)
+                
+            elif callback_data.startswith('set_template_'):
+                template_id = int(callback_data.replace('set_template_', ''))
+                set_default_template(chat_id, template_id)
+                send_telegram_message(chat_id, "✅ Шаблон по умолчанию обновлен")
+                callback_data = 'settings'
+                
+            elif callback_data == 'add_template':
+                send_telegram_message(chat_id, "✏️ Отправьте название и текст нового шаблона в формате:\n\n<code>Название\nТекст ответа</code>\n\nМожно использовать {theme} для подстановки темы")
+                # TODO: сохранять в pending
+                
+            elif callback_data == 'view_reply_logs':
+                logs = get_client_reply_logs(chat_id, 10)
+                if not logs:
+                    text = "📭 Пока нет записей об автоответах"
+                else:
+                    text = "📊 <b>Последние 10 автоответов:</b>\n\n"
+                    for log in logs:
+                        status_emoji = '✅' if log['status'] == 'sent' else '⏳' if log['status'] == 'pending' else '❌'
+                        text += f"{status_emoji} {log['reply_text'][:50]}...\n   {log['created_at']}\n\n"
+                send_telegram_message(chat_id, text)
             
             if callback_data.startswith('rate_'):
                 rating = int(callback_data.split('_')[1])
@@ -521,7 +822,7 @@ def webhook():
                         text = "📭 Кроме вас, компаний пока нет"
                     else:
                         text = "📋 <b>Список компаний:</b>\n\n"
-                        for c in clients[1:]:  # пропускаем админа
+                        for c in clients[1:]:
                             text += f"• {c['name']} (Chat ID: {c['chat_id']})\n  2ГИС: {c.get('url_2gis', '-')[:50]}...\n  Яндекс: {c.get('url_yandex', '-')[:50]}...\n\n"
                     send_telegram_message(chat_id, text)
                     
@@ -534,7 +835,7 @@ def webhook():
                         send_telegram_message(chat_id, "❌ Нет компаний для удаления")
                     else:
                         buttons = []
-                        for c in clients[1:]:  # пропускаем админа
+                        for c in clients[1:]:
                             buttons.append([{'text': f"❌ {c['name']}", 'callback_data': f"del_{c['id']}"}])
                         buttons.append([{'text': '🔙 Назад', 'callback_data': 'admin'}])
                         send_telegram_message(chat_id, "🗑️ Выберите компанию для удаления:", buttons)
@@ -581,7 +882,8 @@ def webhook():
                     [{'text': '📊 Статистика', 'callback_data': 'stats'},
                      {'text': '🔄 Проверить сейчас', 'callback_data': 'check'}],
                     [{'text': '📋 Последние отзывы', 'callback_data': 'last'},
-                     {'text': 'ℹ️ О боте', 'callback_data': 'about'}]
+                     {'text': '⚙️ Настройки', 'callback_data': 'settings'}],
+                    [{'text': 'ℹ️ О боте', 'callback_data': 'about'}]
                 ]
                 if str(chat_id) == TG_ADMIN_ID:
                     buttons.append([{'text': '👑 Админ-панель', 'callback_data': 'admin'}])
@@ -596,9 +898,11 @@ def webhook():
 • 🎯 Анализирует тональность (негатив/позитив)
 • 📊 Еженедельная статистика в Telegram
 • 📱 Сбор отзывов через QR-код
+• 🧠 AI-кластеризация тем (очереди, персонал, чистота)
+• 🤖 Автоответы на позитивные отзывы
 
 <b>Для кого:</b>
-Владельцы ПВЗ, кафе, магазинов, салонов красоты, автомастерских — любого бизнеса с точками на карте.
+Владельцы ПВЗ, кафе, магазинов, салонов красоты, автомастерских.
 
 <b>Преимущества:</b>
 ✅ Не пропустите ни одного негативного отзыва
@@ -606,6 +910,8 @@ def webhook():
 ✅ Полный контроль репутации 24/7
 ✅ Работает в облаке — не нужен ваш компьютер
 ✅ QR-код для мгновенного сбора отзывов
+✅ AI-аналитика ключевых проблем
+✅ Автоматические ответы на "спасибо"
 
 <b>🚀 Готовы подключить ваш бизнес?</b>
 👉 @MaestroMuzlo"""
@@ -632,7 +938,7 @@ def webhook():
                     text = "📋 <b>Последние 5 отзывов:</b>\n\n"
                     for i, r in enumerate(last_reviews[-5:], 1):
                         sentiment = analyze_sentiment(r['text'])
-                        sentiment_emoji = '🔴' if sentiment == 'negative' else '🟢' if sentiment == 'positive' else '⚪'
+                        sentiment_emoji = get_sentiment_emoji(sentiment)
                         text += f"{i}. {r['name']} {sentiment_emoji}\n   {r['text'][:100]}...\n\n"
                 send_telegram_message(chat_id, text)
             
@@ -674,9 +980,10 @@ def run_schedule():
         time.sleep(60)
 
 if __name__ == '__main__':
-    # Инициализация
     load_clients()
     load_qr_codes()
+    load_client_settings()
+    load_templates()
     
     schedule.every().day.at('10:00').do(check_new_reviews)
     schedule.every().sunday.at('20:00').do(send_weekly_stats)
