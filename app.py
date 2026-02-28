@@ -948,18 +948,26 @@ def test():
 @app.route('/api/user/<telegram_id>')
 def api_get_user(telegram_id):
     """Возвращает данные клиента по Telegram ID"""
+    print(f"🔍 API запрос: ищем пользователя с ID: {telegram_id}")
+    
     clients = load_clients()
+    print(f"📁 Загружено клиентов: {len(clients)}")
+    
     telegram_id_str = str(telegram_id).strip()
+    print(f"🔎 Ищем: '{telegram_id_str}'")
     
     for client in clients:
         client_id = str(client.get('chat_id', '')).strip()
+        print(f"   Сравниваем с: '{client_id}'")
         if client_id == telegram_id_str:
+            print(f"✅ Найден: {client.get('name')}")
             return jsonify({
                 'id': client.get('id'),
                 'name': client.get('name'),
                 'chat_id': client.get('chat_id')
             })
     
+    print(f"❌ Пользователь не найден")
     return jsonify({'error': 'User not found'}), 404
 
 @app.route('/api/stats/<telegram_id>')
