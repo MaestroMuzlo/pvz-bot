@@ -974,12 +974,16 @@ def test():
 # =====================================
 # API ДЛЯ MINI APP "ГОЛОС КЛИЕНТА"
 # =====================================
-@app.route('/api/user/<int:telegram_id>')
+# =====================================
+# API ДЛЯ MINI APP "ГОЛОС КЛИЕНТА"
+# =====================================
+@app.route('/api/user/<path:telegram_id>')
 def api_get_user(telegram_id):
-    """Возвращает данные клиента по Telegram ID"""
+    """Возвращает данные клиента по Telegram ID (строка или число)"""
     clients = load_clients()
+    telegram_id_str = str(telegram_id)
     for client in clients:
-        if client['chat_id'] == str(telegram_id):
+        if client['chat_id'] == telegram_id_str:
             return jsonify({
                 'id': client['id'],
                 'name': client['name'],
@@ -987,7 +991,7 @@ def api_get_user(telegram_id):
             })
     return jsonify({'error': 'User not found'}), 404
 
-@app.route('/api/stats/<int:telegram_id>')
+@app.route('/api/stats/<path:telegram_id>')
 def api_get_stats(telegram_id):
     """Возвращает статистику для клиента"""
     stats = load_stats()
@@ -997,13 +1001,13 @@ def api_get_stats(telegram_id):
         'last_updated': stats.get('last_updated')
     })
 
-@app.route('/api/reviews/<int:telegram_id>')
+@app.route('/api/reviews/<path:telegram_id>')
 def api_get_reviews(telegram_id):
     """Возвращает последние отзывы для клиента"""
     reviews = load_last_reviews()
     return jsonify(reviews[-10:])
 
-@app.route('/api/settings/<int:telegram_id>')
+@app.route('/api/settings/<path:telegram_id>')
 def api_get_settings(telegram_id):
     """Возвращает настройки клиента"""
     settings = get_client_settings(telegram_id)
@@ -1012,18 +1016,6 @@ def api_get_settings(telegram_id):
         'settings': settings,
         'templates': templates
     })
-
-@app.route('/api/settings/update', methods=['POST'])
-def api_update_settings():
-    """Обновляет настройки клиента"""
-    data = request.json
-    telegram_id = data.get('telegram_id')
-    settings = data.get('settings', {})
-    
-    for key, value in settings.items():
-        update_client_settings(telegram_id, key, value)
-    
-    return jsonify({'success': True})
 
 # =====================================
 # ПЛАНИРОВЩИК
